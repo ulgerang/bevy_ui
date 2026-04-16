@@ -1,0 +1,15 @@
+[package]
+name = "bevy_ui_xml"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "HTML/XML and CSS-like declarative UI builder for Bevy UI"
+repository = "https://github.com/ulgerang/bevy_ui"
+readme = "README.md"
+
+[dependencies]
+bevy = { version = "0.12.1", default-features = false, features = ["bevy_asset", "bevy_text", "bevy_ui"] }
+roxmltree = "0.21"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
