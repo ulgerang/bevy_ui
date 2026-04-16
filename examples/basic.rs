@@ -6,7 +6,7 @@ const LAYOUT: &str = r#"
     <panel id="menu" class="card" direction="column">
         <text id="title">Bevy UI XML</text>
         <text class="muted">HTML-like structure with CSS-like JSON styles.</text>
-        <button class="primary">Start</button>
+        <btn class="primary">Start</btn>
         <button class="danger">Quit</button>
     </panel>
 </ui>
@@ -58,9 +58,8 @@ fn main() {
 fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn(Camera2dBundle::default());
 
-    let ui = UiXmlBuilder::from_strings(LAYOUT, STYLES)
-        .expect("example layout and styles should parse")
-        .with_default_font("fonts/FiraSans-Bold.ttf");
+    let ui =
+        UiXmlBuilder::from_strings(LAYOUT, STYLES).expect("example layout and styles should parse");
 
     ui.spawn(&mut commands, &asset_server);
 }

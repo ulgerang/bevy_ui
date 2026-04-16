@@ -36,7 +36,7 @@ const LAYOUT: &str = r#"
 <ui id="root" width="100%" height="100%">
     <panel id="menu" class="card" direction="column">
         <text id="title">Bevy UI XML</text>
-        <button class="primary">Start</button>
+        <btn class="primary">Start</btn>
         <button class="danger">Quit</button>
     </panel>
 </ui>
@@ -85,6 +85,8 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
   HTML-like markup rather than a browser-compatible HTML parser.
 - Styles are JSON for parity with the reference project. A real `.css` parser
   can be layered later without changing the Bevy spawn path.
+- Text uses Bevy's embedded default ASCII font by default. Call
+  `with_default_font("path/in/assets.ttf")` when a project needs a specific
+  font or non-ASCII glyph coverage.
 - Bevy dependency is pinned to `0.12.1` because this workspace currently uses
   Rust `1.75.0`.
-
