@@ -5,7 +5,7 @@ HTML/XML and CSS-like declarative UI for Bevy.
 This project is a Rust/Bevy take on the structure used by
 [`ebitenui-xml`](https://github.com/ulgerang/ebitenui-xml): UI hierarchy is
 defined in a familiar XML/HTML-like document, while visual and flex layout
-styles live in a JSON stylesheet with tag, class, and ID selectors.
+styles live in a CSS-like JSON stylesheet.
 
 ## Status
 
@@ -19,18 +19,29 @@ Supported elements:
 - `<button>`, `<btn>` as buttons
 - `<image>`, `<img>` as UI images
 
-Supported selector precedence:
+Supported selectors:
 
-1. tag selector, for example `button`
-2. class selector, for example `.danger`
-3. ID selector, for example `#save`
-4. inline XML attributes for `width`, `height`, and `direction`
+- tag, class, and ID selectors: `button`, `.danger`, `#save`
+- compound selectors: `button.primary`, `button#save`
+- descendant and child selectors: `.menu button`, `.menu > button`
+- attribute selectors: `[disabled]`, `[type=submit]`
+- static disabled pseudo selector: `button:disabled`
+- nested button state styles: `hover`, `active`, and `disabled` when
+  `UiXmlPlugin` is installed
+
+Supported style groups include sizing, padding, margin, border width/color,
+absolute/relative positioning, overflow clipping, aspect ratio, flex direction,
+wrap, align/justify, gaps, flex grow/shrink/basis, background, text color,
+font size, opacity, and display.
+
+Unsupported JSON properties are recorded in `StyleSheet::diagnostics` instead
+of being silently ignored.
 
 ## Example
 
 ```rust
 use bevy::prelude::*;
-use bevy_ui_xml::UiXmlBuilder;
+use bevy_ui_xml::{UiXmlBuilder, UiXmlPlugin};
 
 const LAYOUT: &str = r#"
 <ui id="root" width="100%" height="100%">
@@ -54,13 +65,21 @@ const STYLES: &str = r##"
         ".card": {
             "width": 320,
             "padding": {"all": 20},
+            "border-width": {"all": 2},
+            "border-color": "dodgerblue",
             "gap": 12,
             "background": "#1f2937"
         },
-        "button": {
+        ".card > button.primary": {
             "height": 44,
             "background": "royalblue",
-            "color": "white"
+            "color": "white",
+            "hover": {
+                "background": "dodgerblue"
+            },
+            "active": {
+                "background": "darkred"
+            }
         },
         ".danger": {
             "background": "crimson"
@@ -72,6 +91,13 @@ const STYLES: &str = r##"
     }
 }
 "##;
+
+fn main() {
+    App::new()
+        .add_plugins((DefaultPlugins, UiXmlPlugin))
+        .add_systems(Startup, setup)
+        .run();
+}
 
 fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     let ui = UiXmlBuilder::from_strings(LAYOUT, STYLES).unwrap();

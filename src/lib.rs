@@ -20,6 +20,72 @@ pub enum BevyUiXmlError {
     EmptyLayout,
 }
 
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct UiXmlElement {
+    pub tag: String,
+    pub widget_type: String,
+    pub id: Option<String>,
+    pub classes: Vec<String>,
+    pub attributes: HashMap<String, String>,
+}
+
+impl From<&ElementNode> for UiXmlElement {
+    fn from(node: &ElementNode) -> Self {
+        Self {
+            tag: node.tag.clone(),
+            widget_type: node.widget_type().to_string(),
+            id: node.id.clone(),
+            classes: node.classes.clone(),
+            attributes: node.attributes.clone(),
+        }
+    }
+}
+
+#[derive(Component, Debug, Clone)]
+pub struct UiXmlStateStyles {
+    base: UiStyle,
+    hover: Option<UiStyle>,
+    active: Option<UiStyle>,
+    disabled: Option<UiStyle>,
+}
+
+impl UiXmlStateStyles {
+    fn from_style(style: &UiStyle) -> Self {
+        Self {
+            base: style.without_state_styles(),
+            hover: style.hover.as_deref().map(UiStyle::without_state_styles),
+            active: style.active.as_deref().map(UiStyle::without_state_styles),
+            disabled: style.disabled.as_deref().map(UiStyle::without_state_styles),
+        }
+    }
+
+    fn resolve(&self, interaction: Interaction, disabled: bool) -> UiStyle {
+        let mut style = self.base.clone();
+        if disabled {
+            if let Some(disabled) = &self.disabled {
+                style.merge(disabled);
+            }
+            return style;
+        }
+
+        match interaction {
+            Interaction::Pressed => {
+                if let Some(active) = &self.active {
+                    style.merge(active);
+                }
+            }
+            Interaction::Hovered => {
+                if let Some(hover) = &self.hover {
+                    style.merge(hover);
+                }
+            }
+            Interaction::None => {}
+        }
+
+        style
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct UiDocument {
     pub root: ElementNode,
@@ -114,25 +180,535 @@ fn parse_element(node: roxmltree::Node<'_, '_>) -> ElementNode {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct StyleSheet {
-    #[serde(default)]
     pub styles: HashMap<String, UiStyle>,
+    pub diagnostics: Vec<StyleDiagnostic>,
+    rules: Vec<StyleRule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StyleDiagnostic {
+    UnsupportedProperty { selector: String, property: String },
+    InvalidSelector { selector: String, reason: String },
+}
+
+#[derive(Debug, Clone)]
+struct StyleRule {
+    selector: Selector,
+    style: UiStyle,
+    specificity: u32,
+    order: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Selector {
+    parts: Vec<SelectorPart>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Combinator {
+    Descendant,
+    Child,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SelectorPart {
+    combinator: Option<Combinator>,
+    simple: SimpleSelector,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct SimpleSelector {
+    tag: Option<String>,
+    id: Option<String>,
+    classes: Vec<String>,
+    attributes: Vec<AttributeSelector>,
+    pseudo: Option<PseudoClass>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AttributeSelector {
+    name: String,
+    value: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PseudoClass {
+    Hover,
+    Active,
+    Focus,
+    Disabled,
+}
+
+impl Selector {
+    fn parse(input: &str) -> Option<Self> {
+        let parts = split_selector(input)
+            .into_iter()
+            .map(|(combinator, token)| {
+                SimpleSelector::parse(&token).map(|simple| SelectorPart { combinator, simple })
+            })
+            .collect::<Option<Vec<_>>>()?;
+
+        if parts.is_empty() {
+            None
+        } else {
+            Some(Self { parts })
+        }
+    }
+
+    fn specificity(&self) -> u32 {
+        self.parts
+            .iter()
+            .map(|part| part.simple.specificity())
+            .sum()
+    }
+
+    fn matches(&self, path: &[&ElementNode]) -> Option<u32> {
+        if path.is_empty() {
+            return None;
+        }
+
+        let mut path_index = path.len() - 1;
+        let mut bonus = self.parts.last()?.simple.matches(path[path_index])?;
+
+        for part_index in (0..self.parts.len().saturating_sub(1)).rev() {
+            match self.parts[part_index + 1]
+                .combinator
+                .unwrap_or(Combinator::Descendant)
+            {
+                Combinator::Child => {
+                    if path_index == 0 {
+                        return None;
+                    }
+                    path_index -= 1;
+                    bonus += self.parts[part_index].simple.matches(path[path_index])?;
+                }
+                Combinator::Descendant => {
+                    let mut matched = None;
+                    for ancestor_index in (0..path_index).rev() {
+                        if let Some(part_bonus) =
+                            self.parts[part_index].simple.matches(path[ancestor_index])
+                        {
+                            matched = Some((ancestor_index, part_bonus));
+                            break;
+                        }
+                    }
+                    let (ancestor_index, part_bonus) = matched?;
+                    path_index = ancestor_index;
+                    bonus += part_bonus;
+                }
+            }
+        }
+
+        Some(bonus)
+    }
+}
+
+impl SimpleSelector {
+    fn parse(input: &str) -> Option<Self> {
+        let mut selector = Self::default();
+        let chars = input.trim().chars().collect::<Vec<_>>();
+        if chars.is_empty() {
+            return None;
+        }
+
+        let mut index = 0;
+        if is_ident_start(chars[index]) || chars[index] == '*' {
+            let start = index;
+            index += 1;
+            while index < chars.len() && is_ident_continue(chars[index]) {
+                index += 1;
+            }
+            if chars[start] != '*' {
+                selector.tag = Some(
+                    chars[start..index]
+                        .iter()
+                        .collect::<String>()
+                        .to_ascii_lowercase(),
+                );
+            }
+        }
+
+        while index < chars.len() {
+            match chars[index] {
+                '#' => {
+                    index += 1;
+                    let (value, next) = parse_ident(&chars, index)?;
+                    selector.id = Some(value);
+                    index = next;
+                }
+                '.' => {
+                    index += 1;
+                    let (value, next) = parse_ident(&chars, index)?;
+                    selector.classes.push(value);
+                    index = next;
+                }
+                '[' => {
+                    let (attribute, next) = parse_attribute_selector(&chars, index)?;
+                    selector.attributes.push(attribute);
+                    index = next;
+                }
+                ':' => {
+                    index += 1;
+                    let (value, next) = parse_ident(&chars, index)?;
+                    selector.pseudo = PseudoClass::parse(&value);
+                    selector.pseudo?;
+                    index = next;
+                }
+                _ => return None,
+            }
+        }
+
+        Some(selector)
+    }
+
+    fn specificity(&self) -> u32 {
+        let mut score = 0;
+        if self.id.is_some() {
+            score += 100;
+        }
+        score += (self.classes.len() + self.attributes.len()) as u32 * 10;
+        if self.pseudo.is_some() {
+            score += 10;
+        }
+        if self.tag.is_some() {
+            score += 1;
+        }
+        score
+    }
+
+    fn matches(&self, node: &ElementNode) -> Option<u32> {
+        let mut bonus = 0;
+
+        if let Some(tag) = &self.tag {
+            if tag == &node.tag {
+                if node.widget_type() != node.tag {
+                    bonus += 1;
+                }
+            } else if tag != node.widget_type() {
+                return None;
+            }
+        }
+
+        if let Some(id) = &self.id {
+            if node.id.as_deref() != Some(id.as_str()) {
+                return None;
+            }
+        }
+
+        for class_name in &self.classes {
+            if !node.classes.iter().any(|candidate| candidate == class_name) {
+                return None;
+            }
+        }
+
+        for attr in &self.attributes {
+            let value = node.attr(&attr.name)?;
+            if let Some(expected) = &attr.value {
+                if value != expected {
+                    return None;
+                }
+            }
+        }
+
+        if let Some(pseudo) = self.pseudo {
+            if !pseudo.matches_static(node) {
+                return None;
+            }
+        }
+
+        Some(bonus)
+    }
+}
+
+impl PseudoClass {
+    fn parse(input: &str) -> Option<Self> {
+        match input {
+            "hover" => Some(Self::Hover),
+            "active" => Some(Self::Active),
+            "focus" => Some(Self::Focus),
+            "disabled" => Some(Self::Disabled),
+            _ => None,
+        }
+    }
+
+    fn matches_static(self, node: &ElementNode) -> bool {
+        match self {
+            Self::Disabled => node.attr("disabled").is_some(),
+            Self::Hover | Self::Active | Self::Focus => false,
+        }
+    }
+}
+
+fn split_selector(input: &str) -> Vec<(Option<Combinator>, String)> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    let mut pending = None;
+
+    for ch in input.trim().chars() {
+        match ch {
+            '[' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ']' => {
+                depth = depth.saturating_sub(1);
+                current.push(ch);
+            }
+            '>' if depth == 0 => {
+                push_selector_part(&mut parts, &mut current, pending.take());
+                pending = Some(Combinator::Child);
+            }
+            ch if ch.is_whitespace() && depth == 0 => {
+                if current.trim().is_empty() {
+                    if !parts.is_empty() && pending.is_none() {
+                        pending = Some(Combinator::Descendant);
+                    }
+                } else {
+                    push_selector_part(&mut parts, &mut current, pending.take());
+                    if !parts.is_empty() && pending.is_none() {
+                        pending = Some(Combinator::Descendant);
+                    }
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    push_selector_part(&mut parts, &mut current, pending);
+    if let Some(first) = parts.first_mut() {
+        first.0 = None;
+    }
+    parts
+}
+
+fn push_selector_part(
+    parts: &mut Vec<(Option<Combinator>, String)>,
+    current: &mut String,
+    combinator: Option<Combinator>,
+) {
+    let token = current.trim();
+    if !token.is_empty() {
+        parts.push((combinator, token.to_string()));
+    }
+    current.clear();
+}
+
+fn parse_ident(chars: &[char], start: usize) -> Option<(String, usize)> {
+    if start >= chars.len() || !is_ident_start(chars[start]) {
+        return None;
+    }
+
+    let mut index = start + 1;
+    while index < chars.len() && is_ident_continue(chars[index]) {
+        index += 1;
+    }
+
+    Some((chars[start..index].iter().collect(), index))
+}
+
+fn parse_attribute_selector(chars: &[char], start: usize) -> Option<(AttributeSelector, usize)> {
+    let mut index = start + 1;
+    let mut raw = String::new();
+    while index < chars.len() && chars[index] != ']' {
+        raw.push(chars[index]);
+        index += 1;
+    }
+    if index >= chars.len() {
+        return None;
+    }
+
+    let (name, value) = if let Some((name, value)) = raw.split_once('=') {
+        (
+            name.trim().to_string(),
+            Some(
+                value
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string(),
+            ),
+        )
+    } else {
+        (raw.trim().to_string(), None)
+    };
+
+    if name.is_empty() {
+        return None;
+    }
+
+    Some((AttributeSelector { name, value }, index + 1))
+}
+
+fn is_ident_start(ch: char) -> bool {
+    ch.is_ascii_alphabetic() || ch == '_' || ch == '-'
+}
+
+fn is_ident_continue(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'
+}
+
+fn normalize_style_value(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(object) => serde_json::Value::Object(
+            object
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        canonical_property_name(key).unwrap_or(key).to_string(),
+                        normalize_style_value(value),
+                    )
+                })
+                .collect(),
+        ),
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.iter().map(normalize_style_value).collect())
+        }
+        value => value.clone(),
+    }
+}
+
+fn collect_style_diagnostics(
+    selector: &str,
+    value: &serde_json::Value,
+    diagnostics: &mut Vec<StyleDiagnostic>,
+) {
+    let Some(object) = value.as_object() else {
+        return;
+    };
+
+    for (property, nested) in object {
+        if let Some(state) = matches_state_property(property) {
+            collect_style_diagnostics(selector, nested, diagnostics);
+            if canonical_property_name(state).is_none() {
+                diagnostics.push(StyleDiagnostic::UnsupportedProperty {
+                    selector: selector.to_string(),
+                    property: property.clone(),
+                });
+            }
+            continue;
+        }
+
+        if canonical_property_name(property).is_none() {
+            diagnostics.push(StyleDiagnostic::UnsupportedProperty {
+                selector: selector.to_string(),
+                property: property.clone(),
+            });
+        }
+    }
+}
+
+fn matches_state_property(property: &str) -> Option<&str> {
+    match property {
+        "hover" | "active" | "focus" | "disabled" => Some(property),
+        _ => None,
+    }
+}
+
+fn canonical_property_name(property: &str) -> Option<&'static str> {
+    match property {
+        "width" => Some("width"),
+        "height" => Some("height"),
+        "minWidth" | "min-width" => Some("minWidth"),
+        "minHeight" | "min-height" => Some("minHeight"),
+        "maxWidth" | "max-width" => Some("maxWidth"),
+        "maxHeight" | "max-height" => Some("maxHeight"),
+        "padding" => Some("padding"),
+        "margin" => Some("margin"),
+        "border" => Some("border"),
+        "borderWidth" | "border-width" => Some("borderWidth"),
+        "borderColor" | "border-color" => Some("borderColor"),
+        "position" => Some("position"),
+        "left" => Some("left"),
+        "right" => Some("right"),
+        "top" => Some("top"),
+        "bottom" => Some("bottom"),
+        "overflow" => Some("overflow"),
+        "aspectRatio" | "aspect-ratio" => Some("aspectRatio"),
+        "direction" => Some("direction"),
+        "flexDirection" | "flex-direction" => Some("flexDirection"),
+        "flexWrap" | "flex-wrap" => Some("flexWrap"),
+        "justify" => Some("justify"),
+        "justifyContent" | "justify-content" => Some("justifyContent"),
+        "align" => Some("align"),
+        "alignItems" | "align-items" => Some("alignItems"),
+        "alignSelf" | "align-self" => Some("alignSelf"),
+        "gap" => Some("gap"),
+        "rowGap" | "row-gap" => Some("rowGap"),
+        "columnGap" | "column-gap" => Some("columnGap"),
+        "flexGrow" | "flex-grow" => Some("flexGrow"),
+        "flexShrink" | "flex-shrink" => Some("flexShrink"),
+        "flexBasis" | "flex-basis" => Some("flexBasis"),
+        "background" | "backgroundColor" | "background-color" => Some("background"),
+        "color" => Some("color"),
+        "fontSize" | "font-size" => Some("fontSize"),
+        "opacity" => Some("opacity"),
+        "display" => Some("display"),
+        "hover" => Some("hover"),
+        "active" => Some("active"),
+        "focus" => Some("focus"),
+        "disabled" => Some("disabled"),
+        _ => None,
+    }
 }
 
 impl StyleSheet {
     pub fn parse(input: &str) -> Result<Self, BevyUiXmlError> {
         let value: serde_json::Value = serde_json::from_str(input)?;
-        if value.get("styles").is_some() {
-            Ok(serde_json::from_value(value)?)
-        } else {
-            Ok(Self {
-                styles: serde_json::from_value(value)?,
-            })
+
+        let styles_value = value.get("styles").unwrap_or(&value);
+        let Some(styles_object) = styles_value.as_object() else {
+            return Ok(Self::default());
+        };
+
+        let mut styles = HashMap::new();
+        let mut diagnostics = Vec::new();
+        let mut rules = Vec::new();
+
+        for (order, (selector, style_value)) in styles_object.iter().enumerate() {
+            collect_style_diagnostics(selector, style_value, &mut diagnostics);
+            let style: UiStyle = serde_json::from_value(normalize_style_value(style_value))?;
+            styles.insert(selector.clone(), style.clone());
+
+            match Selector::parse(selector) {
+                Some(selector) => rules.push(StyleRule {
+                    specificity: selector.specificity(),
+                    order,
+                    selector,
+                    style,
+                }),
+                None => diagnostics.push(StyleDiagnostic::InvalidSelector {
+                    selector: selector.clone(),
+                    reason: "empty selector".to_string(),
+                }),
+            }
         }
+
+        Ok(Self {
+            styles,
+            diagnostics,
+            rules,
+        })
     }
 
     pub fn computed_style(&self, node: &ElementNode) -> UiStyle {
+        self.computed_style_for_path(&[node])
+    }
+
+    pub fn computed_style_for_path(&self, path: &[&ElementNode]) -> UiStyle {
+        if self.rules.is_empty() {
+            self.legacy_computed_style(path.last().copied())
+        } else {
+            self.rule_computed_style(path)
+        }
+    }
+
+    fn legacy_computed_style(&self, node: Option<&ElementNode>) -> UiStyle {
+        let Some(node) = node else {
+            return UiStyle::default();
+        };
         let mut style = UiStyle::default();
         let widget_type = node.widget_type();
 
@@ -161,6 +737,31 @@ impl StyleSheet {
         style.apply_inline_attributes(node);
         style
     }
+
+    fn rule_computed_style(&self, path: &[&ElementNode]) -> UiStyle {
+        let Some(node) = path.last().copied() else {
+            return UiStyle::default();
+        };
+
+        let mut matched = self
+            .rules
+            .iter()
+            .filter_map(|rule| {
+                rule.selector
+                    .matches(path)
+                    .map(|bonus| (rule.specificity + bonus, rule.order, &rule.style))
+            })
+            .collect::<Vec<_>>();
+
+        matched.sort_by_key(|(specificity, order, _)| (*specificity, *order));
+
+        let mut style = UiStyle::default();
+        for (_, _, rule_style) in matched {
+            style.merge(rule_style);
+        }
+        style.apply_inline_attributes(node);
+        style
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -174,18 +775,39 @@ pub struct UiStyle {
     pub max_height: Option<Length>,
     pub padding: Option<EdgeSizes>,
     pub margin: Option<EdgeSizes>,
+    pub border: Option<EdgeSizes>,
+    pub border_width: Option<EdgeSizes>,
+    pub border_color: Option<String>,
+    pub position: Option<PositionValue>,
+    pub left: Option<Length>,
+    pub right: Option<Length>,
+    pub top: Option<Length>,
+    pub bottom: Option<Length>,
+    pub overflow: Option<OverflowValue>,
+    pub aspect_ratio: Option<f32>,
     pub direction: Option<FlexDirectionValue>,
+    pub flex_direction: Option<FlexDirectionValue>,
+    pub flex_wrap: Option<FlexWrapValue>,
     pub justify: Option<JustifyValue>,
     pub justify_content: Option<JustifyValue>,
     pub align: Option<AlignValue>,
     pub align_items: Option<AlignValue>,
+    pub align_self: Option<AlignSelfValue>,
     pub gap: Option<f32>,
+    pub row_gap: Option<Length>,
+    pub column_gap: Option<Length>,
     pub flex_grow: Option<f32>,
     pub flex_shrink: Option<f32>,
+    pub flex_basis: Option<Length>,
     pub background: Option<String>,
     pub color: Option<String>,
     pub font_size: Option<f32>,
+    pub opacity: Option<f32>,
     pub display: Option<DisplayValue>,
+    pub hover: Option<Box<UiStyle>>,
+    pub active: Option<Box<UiStyle>>,
+    pub focus: Option<Box<UiStyle>>,
+    pub disabled: Option<Box<UiStyle>>,
 }
 
 impl UiStyle {
@@ -206,18 +828,39 @@ impl UiStyle {
         merge_field!(max_height);
         merge_field!(padding);
         merge_field!(margin);
+        merge_field!(border);
+        merge_field!(border_width);
+        merge_field!(border_color);
+        merge_field!(position);
+        merge_field!(left);
+        merge_field!(right);
+        merge_field!(top);
+        merge_field!(bottom);
+        merge_field!(overflow);
+        merge_field!(aspect_ratio);
         merge_field!(direction);
+        merge_field!(flex_direction);
+        merge_field!(flex_wrap);
         merge_field!(justify);
         merge_field!(justify_content);
         merge_field!(align);
         merge_field!(align_items);
+        merge_field!(align_self);
         merge_field!(gap);
+        merge_field!(row_gap);
+        merge_field!(column_gap);
         merge_field!(flex_grow);
         merge_field!(flex_shrink);
+        merge_field!(flex_basis);
         merge_field!(background);
         merge_field!(color);
         merge_field!(font_size);
+        merge_field!(opacity);
         merge_field!(display);
+        merge_field!(hover);
+        merge_field!(active);
+        merge_field!(focus);
+        merge_field!(disabled);
     }
 
     fn apply_inline_attributes(&mut self, node: &ElementNode) {
@@ -230,6 +873,15 @@ impl UiStyle {
         if let Some(direction) = node.attr("direction").and_then(FlexDirectionValue::parse) {
             self.direction = Some(direction);
         }
+    }
+
+    fn without_state_styles(&self) -> Self {
+        let mut style = self.clone();
+        style.hover = None;
+        style.active = None;
+        style.focus = None;
+        style.disabled = None;
+        style
     }
 }
 
@@ -271,36 +923,71 @@ impl Length {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(untagged)]
 pub enum EdgeSizes {
-    All(f32),
+    All(Length),
+    Array(Vec<Length>),
     Sides {
-        all: Option<f32>,
-        top: Option<f32>,
-        right: Option<f32>,
-        bottom: Option<f32>,
-        left: Option<f32>,
+        all: Option<Length>,
+        x: Option<Length>,
+        y: Option<Length>,
+        top: Option<Length>,
+        right: Option<Length>,
+        bottom: Option<Length>,
+        left: Option<Length>,
     },
 }
 
 impl EdgeSizes {
-    fn to_ui_rect(self) -> UiRect {
+    fn to_ui_rect(&self) -> UiRect {
         match self {
-            Self::All(value) => UiRect::all(Val::Px(value)),
+            Self::All(value) => UiRect::all(value.clone().into_val()),
+            Self::Array(values) => match values.as_slice() {
+                [all] => UiRect::all(all.clone().into_val()),
+                [vertical, horizontal] => {
+                    UiRect::axes(horizontal.clone().into_val(), vertical.clone().into_val())
+                }
+                [top, horizontal, bottom] => UiRect {
+                    left: horizontal.clone().into_val(),
+                    right: horizontal.clone().into_val(),
+                    top: top.clone().into_val(),
+                    bottom: bottom.clone().into_val(),
+                },
+                [top, right, bottom, left, ..] => UiRect {
+                    left: left.clone().into_val(),
+                    right: right.clone().into_val(),
+                    top: top.clone().into_val(),
+                    bottom: bottom.clone().into_val(),
+                },
+                [] => UiRect::default(),
+            },
             Self::Sides {
                 all,
+                x,
+                y,
                 top,
                 right,
                 bottom,
                 left,
             } => {
-                let fallback = all.unwrap_or(0.0);
+                let fallback = all.clone().unwrap_or(Length::Px(0.0));
+                let horizontal = x.clone().unwrap_or_else(|| fallback.clone());
+                let vertical = y.clone().unwrap_or_else(|| fallback.clone());
                 UiRect {
-                    left: Val::Px(left.unwrap_or(fallback)),
-                    right: Val::Px(right.unwrap_or(fallback)),
-                    top: Val::Px(top.unwrap_or(fallback)),
-                    bottom: Val::Px(bottom.unwrap_or(fallback)),
+                    left: left
+                        .clone()
+                        .unwrap_or_else(|| horizontal.clone())
+                        .into_val(),
+                    right: right
+                        .clone()
+                        .unwrap_or_else(|| horizontal.clone())
+                        .into_val(),
+                    top: top.clone().unwrap_or_else(|| vertical.clone()).into_val(),
+                    bottom: bottom
+                        .clone()
+                        .unwrap_or_else(|| vertical.clone())
+                        .into_val(),
                 }
             }
         }
@@ -333,6 +1020,24 @@ impl FlexDirectionValue {
             Self::Column => FlexDirection::Column,
             Self::RowReverse => FlexDirection::RowReverse,
             Self::ColumnReverse => FlexDirection::ColumnReverse,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FlexWrapValue {
+    NoWrap,
+    Wrap,
+    WrapReverse,
+}
+
+impl FlexWrapValue {
+    fn to_bevy(self) -> FlexWrap {
+        match self {
+            Self::NoWrap => FlexWrap::NoWrap,
+            Self::Wrap => FlexWrap::Wrap,
+            Self::WrapReverse => FlexWrap::WrapReverse,
         }
     }
 }
@@ -383,6 +1088,28 @@ impl AlignValue {
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+pub enum AlignSelfValue {
+    Auto,
+    FlexStart,
+    FlexEnd,
+    Center,
+    Stretch,
+}
+
+impl AlignSelfValue {
+    fn to_bevy(self) -> AlignSelf {
+        match self {
+            Self::Auto => AlignSelf::Auto,
+            Self::FlexStart => AlignSelf::FlexStart,
+            Self::FlexEnd => AlignSelf::FlexEnd,
+            Self::Center => AlignSelf::Center,
+            Self::Stretch => AlignSelf::Stretch,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum DisplayValue {
     Flex,
     None,
@@ -397,10 +1124,79 @@ impl DisplayValue {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PositionValue {
+    Relative,
+    Absolute,
+}
+
+impl PositionValue {
+    fn to_bevy(self) -> PositionType {
+        match self {
+            Self::Relative => PositionType::Relative,
+            Self::Absolute => PositionType::Absolute,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OverflowValue {
+    Visible,
+    Hidden,
+    Clip,
+}
+
+impl OverflowValue {
+    fn to_bevy(self) -> Overflow {
+        match self {
+            Self::Visible => Overflow::visible(),
+            Self::Hidden | Self::Clip => Overflow::clip(),
+        }
+    }
+}
+
 pub struct UiXmlPlugin;
 
 impl Plugin for UiXmlPlugin {
-    fn build(&self, _app: &mut App) {}
+    fn build(&self, app: &mut App) {
+        app.add_systems(Update, apply_interaction_styles);
+    }
+}
+
+type InteractionStyleQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Interaction,
+        &'static UiXmlStateStyles,
+        &'static UiXmlElement,
+        &'static mut Style,
+        &'static mut BackgroundColor,
+        &'static mut BorderColor,
+    ),
+    Changed<Interaction>,
+>;
+
+fn apply_interaction_styles(mut query: InteractionStyleQuery<'_, '_>) {
+    for (interaction, state_styles, element, mut bevy_style, mut background, mut border) in
+        &mut query
+    {
+        let resolved =
+            state_styles.resolve(*interaction, element.attributes.contains_key("disabled"));
+        *bevy_style = to_bevy_style(&resolved);
+        background.0 = style_color(
+            resolved.background.as_deref(),
+            Color::NONE,
+            resolved.opacity,
+        );
+        border.0 = style_color(
+            resolved.border_color.as_deref(),
+            Color::NONE,
+            resolved.opacity,
+        );
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -425,12 +1221,14 @@ impl UiXmlBuilder {
     }
 
     pub fn spawn(&self, commands: &mut Commands<'_, '_>, asset_server: &AssetServer) -> Entity {
+        let mut ancestors = Vec::new();
         spawn_node(
             commands,
             asset_server,
             &self.document.root,
             &self.stylesheet,
             self.default_font.as_deref(),
+            &mut ancestors,
         )
     }
 }
@@ -442,12 +1240,14 @@ pub fn spawn_document(
     stylesheet: &StyleSheet,
     default_font: &str,
 ) -> Entity {
+    let mut ancestors = Vec::new();
     spawn_node(
         commands,
         asset_server,
         &document.root,
         stylesheet,
         Some(default_font),
+        &mut ancestors,
     )
 }
 
@@ -457,20 +1257,32 @@ pub fn spawn_document_with_embedded_font(
     document: &UiDocument,
     stylesheet: &StyleSheet,
 ) -> Entity {
-    spawn_node(commands, asset_server, &document.root, stylesheet, None)
+    let mut ancestors = Vec::new();
+    spawn_node(
+        commands,
+        asset_server,
+        &document.root,
+        stylesheet,
+        None,
+        &mut ancestors,
+    )
 }
 
-fn spawn_node(
+fn spawn_node<'a>(
     commands: &mut Commands<'_, '_>,
     asset_server: &AssetServer,
-    node: &ElementNode,
+    node: &'a ElementNode,
     stylesheet: &StyleSheet,
     default_font: Option<&str>,
+    ancestors: &mut Vec<&'a ElementNode>,
 ) -> Entity {
-    let style = stylesheet.computed_style(node);
+    let mut path = ancestors.clone();
+    path.push(node);
+    let style = stylesheet.computed_style_for_path(&path);
     let bevy_style = to_bevy_style(&style);
-    let background = parse_color(style.background.as_deref()).unwrap_or(Color::NONE);
-    let text_color = parse_color(style.color.as_deref()).unwrap_or(Color::WHITE);
+    let background = style_color(style.background.as_deref(), Color::NONE, style.opacity);
+    let border_color = style_color(style.border_color.as_deref(), Color::NONE, style.opacity);
+    let text_color = style_color(style.color.as_deref(), Color::WHITE, style.opacity);
     let font_size = style.font_size.unwrap_or(16.0);
 
     match node.widget_type() {
@@ -479,8 +1291,11 @@ fn spawn_node(
                 .spawn(ButtonBundle {
                     style: bevy_style,
                     background_color: background.into(),
+                    border_color: border_color.into(),
                     ..Default::default()
                 })
+                .insert(UiXmlElement::from(node))
+                .insert(UiXmlStateStyles::from_style(&style))
                 .id();
 
             let label = node.attr("label").unwrap_or(&node.text);
@@ -505,6 +1320,7 @@ fn spawn_node(
                 node,
                 stylesheet,
                 default_font,
+                ancestors,
             );
             entity
         }
@@ -524,8 +1340,10 @@ fn spawn_node(
                         },
                     ),
                     style: bevy_style,
+                    background_color: background.into(),
                     ..Default::default()
                 })
+                .insert(UiXmlElement::from(node))
                 .id()
         }
         "image" => {
@@ -539,6 +1357,7 @@ fn spawn_node(
                     background_color: background.into(),
                     ..Default::default()
                 })
+                .insert(UiXmlElement::from(node))
                 .id()
         }
         _ => {
@@ -546,8 +1365,10 @@ fn spawn_node(
                 .spawn(NodeBundle {
                     style: bevy_style,
                     background_color: background.into(),
+                    border_color: border_color.into(),
                     ..Default::default()
                 })
+                .insert(UiXmlElement::from(node))
                 .id();
             add_children(
                 commands,
@@ -556,24 +1377,35 @@ fn spawn_node(
                 node,
                 stylesheet,
                 default_font,
+                ancestors,
             );
             entity
         }
     }
 }
 
-fn add_children(
+fn add_children<'a>(
     commands: &mut Commands<'_, '_>,
     asset_server: &AssetServer,
     parent: Entity,
-    node: &ElementNode,
+    node: &'a ElementNode,
     stylesheet: &StyleSheet,
     default_font: Option<&str>,
+    ancestors: &mut Vec<&'a ElementNode>,
 ) {
+    ancestors.push(node);
     for child in &node.children {
-        let child_entity = spawn_node(commands, asset_server, child, stylesheet, default_font);
+        let child_entity = spawn_node(
+            commands,
+            asset_server,
+            child,
+            stylesheet,
+            default_font,
+            ancestors,
+        );
         commands.entity(parent).add_child(child_entity);
     }
+    ancestors.pop();
 }
 
 fn load_font(asset_server: &AssetServer, default_font: Option<&str>) -> Handle<Font> {
@@ -603,14 +1435,43 @@ fn to_bevy_style(style: &UiStyle) -> Style {
     if let Some(max_height) = style.max_height.clone() {
         bevy_style.max_height = max_height.into_val();
     }
-    if let Some(padding) = style.padding {
+    if let Some(position) = style.position {
+        bevy_style.position_type = position.to_bevy();
+    }
+    if let Some(left) = style.left.clone() {
+        bevy_style.left = left.into_val();
+    }
+    if let Some(right) = style.right.clone() {
+        bevy_style.right = right.into_val();
+    }
+    if let Some(top) = style.top.clone() {
+        bevy_style.top = top.into_val();
+    }
+    if let Some(bottom) = style.bottom.clone() {
+        bevy_style.bottom = bottom.into_val();
+    }
+    if let Some(overflow) = style.overflow {
+        bevy_style.overflow = overflow.to_bevy();
+    }
+    if let Some(aspect_ratio) = style.aspect_ratio {
+        bevy_style.aspect_ratio = Some(aspect_ratio);
+    }
+    if let Some(padding) = &style.padding {
         bevy_style.padding = padding.to_ui_rect();
     }
-    if let Some(margin) = style.margin {
+    if let Some(margin) = &style.margin {
         bevy_style.margin = margin.to_ui_rect();
     }
-    if let Some(direction) = style.direction {
+    if let Some(border) = &style.border_width {
+        bevy_style.border = border.to_ui_rect();
+    } else if let Some(border) = &style.border {
+        bevy_style.border = border.to_ui_rect();
+    }
+    if let Some(direction) = style.flex_direction.or(style.direction) {
         bevy_style.flex_direction = direction.to_bevy();
+    }
+    if let Some(flex_wrap) = style.flex_wrap {
+        bevy_style.flex_wrap = flex_wrap.to_bevy();
     }
     if let Some(justify) = style.justify_content.or(style.justify) {
         bevy_style.justify_content = justify.to_bevy();
@@ -618,9 +1479,18 @@ fn to_bevy_style(style: &UiStyle) -> Style {
     if let Some(align) = style.align_items.or(style.align) {
         bevy_style.align_items = align.to_bevy();
     }
+    if let Some(align_self) = style.align_self {
+        bevy_style.align_self = align_self.to_bevy();
+    }
     if let Some(gap) = style.gap {
         bevy_style.row_gap = Val::Px(gap);
         bevy_style.column_gap = Val::Px(gap);
+    }
+    if let Some(row_gap) = style.row_gap.clone() {
+        bevy_style.row_gap = row_gap.into_val();
+    }
+    if let Some(column_gap) = style.column_gap.clone() {
+        bevy_style.column_gap = column_gap.into_val();
     }
     if let Some(flex_grow) = style.flex_grow {
         bevy_style.flex_grow = flex_grow;
@@ -628,11 +1498,23 @@ fn to_bevy_style(style: &UiStyle) -> Style {
     if let Some(flex_shrink) = style.flex_shrink {
         bevy_style.flex_shrink = flex_shrink;
     }
+    if let Some(flex_basis) = style.flex_basis.clone() {
+        bevy_style.flex_basis = flex_basis.into_val();
+    }
     if let Some(display) = style.display {
         bevy_style.display = display.to_bevy();
     }
 
     bevy_style
+}
+
+fn style_color(value: Option<&str>, fallback: Color, opacity: Option<f32>) -> Color {
+    let mut color = parse_color(value).unwrap_or(fallback);
+    if let Some(opacity) = opacity {
+        let [r, g, b, a] = color.as_rgba_f32();
+        color = Color::rgba(r, g, b, a * opacity.clamp(0.0, 1.0));
+    }
+    color
 }
 
 fn parse_color(value: Option<&str>) -> Option<Color> {
@@ -930,6 +1812,170 @@ mod tests {
         assert_eq!(
             parse_color(Some("royalblue")).map(|color| color.as_rgba_u8()),
             Some([65, 105, 225, 255])
+        );
+    }
+
+    #[test]
+    fn matches_compound_descendant_child_attribute_and_disabled_selectors() {
+        let child_selector = Selector::parse(".menu > button").unwrap();
+        assert_eq!(child_selector.parts[1].combinator, Some(Combinator::Child));
+
+        let doc = parse_layout(
+            r#"
+            <ui>
+                <div class="menu">
+                    <button id="start" class="primary" disabled="true">Start</button>
+                    <panel><button id="nested">Nested</button></panel>
+                </div>
+            </ui>
+            "#,
+        )
+        .unwrap();
+        let menu = &doc.root.children[0];
+        let start = &menu.children[0];
+        let nested = &menu.children[1].children[0];
+        let sheet = StyleSheet::parse(
+            r##"{
+                "styles": {
+                    "button.primary": {"width": 100},
+                    ".menu button": {"height": 40},
+                    ".menu > button": {"fontSize": 18},
+                    "[disabled=true]": {"opacity": 0.5},
+                    "button:disabled": {"background": "gray"}
+                }
+            }"##,
+        )
+        .unwrap();
+
+        let start_style = sheet.computed_style_for_path(&[&doc.root, menu, start]);
+        let nested_style =
+            sheet.computed_style_for_path(&[&doc.root, menu, &menu.children[1], nested]);
+
+        assert_eq!(start_style.width, Some(Length::Px(100.0)));
+        assert_eq!(start_style.height, Some(Length::Px(40.0)));
+        assert_eq!(start_style.font_size, Some(18.0));
+        assert_eq!(start_style.opacity, Some(0.5));
+        assert_eq!(start_style.background.as_deref(), Some("gray"));
+        assert_eq!(nested_style.height, Some(Length::Px(40.0)));
+        assert_eq!(nested_style.font_size, None);
+    }
+
+    #[test]
+    fn parses_more_css_like_box_and_position_properties() {
+        let doc = parse_layout(r#"<div></div>"#).unwrap();
+        let sheet = StyleSheet::parse(
+            r##"{
+                "styles": {
+                    "panel": {
+                        "position": "absolute",
+                        "left": "10px",
+                        "top": "5%",
+                        "padding": [4, 8],
+                        "border-width": {"all": 2},
+                        "border-color": "tomato",
+                        "overflow": "hidden",
+                        "aspect-ratio": 1.5,
+                        "flex-wrap": "wrap",
+                        "align-self": "center",
+                        "row-gap": 6,
+                        "column-gap": "10px",
+                        "flex-basis": "25%"
+                    }
+                }
+            }"##,
+        )
+        .unwrap();
+
+        let style = sheet.computed_style(&doc.root);
+        assert_eq!(style.position, Some(PositionValue::Absolute));
+        assert_eq!(style.left, Some(Length::Text("10px".to_string())));
+        assert_eq!(style.top, Some(Length::Text("5%".to_string())));
+        assert_eq!(
+            style.border_width,
+            Some(EdgeSizes::Sides {
+                all: Some(Length::Px(2.0)),
+                x: None,
+                y: None,
+                top: None,
+                right: None,
+                bottom: None,
+                left: None,
+            })
+        );
+        assert_eq!(style.border_color.as_deref(), Some("tomato"));
+        assert_eq!(style.overflow, Some(OverflowValue::Hidden));
+        assert_eq!(style.aspect_ratio, Some(1.5));
+        assert_eq!(style.flex_wrap, Some(FlexWrapValue::Wrap));
+        assert_eq!(style.align_self, Some(AlignSelfValue::Center));
+        assert_eq!(style.row_gap, Some(Length::Px(6.0)));
+        assert_eq!(style.column_gap, Some(Length::Text("10px".to_string())));
+        assert_eq!(style.flex_basis, Some(Length::Text("25%".to_string())));
+    }
+
+    #[test]
+    fn reports_unsupported_style_properties() {
+        let sheet = StyleSheet::parse(
+            r##"{
+                "styles": {
+                    ".card": {
+                        "boxShadow": "0 4px 8px black",
+                        "hover": {
+                            "filter": "blur(2px)"
+                        }
+                    }
+                }
+            }"##,
+        )
+        .unwrap();
+
+        assert_eq!(sheet.diagnostics.len(), 2);
+        assert!(sheet.diagnostics.iter().any(|diagnostic| matches!(
+            diagnostic,
+            StyleDiagnostic::UnsupportedProperty { property, .. } if property == "boxShadow"
+        )));
+        assert!(sheet.diagnostics.iter().any(|diagnostic| matches!(
+            diagnostic,
+            StyleDiagnostic::UnsupportedProperty { property, .. } if property == "filter"
+        )));
+    }
+
+    #[test]
+    fn resolves_nested_button_state_styles() {
+        let style = UiStyle {
+            background: Some("royalblue".to_string()),
+            hover: Some(Box::new(UiStyle {
+                background: Some("dodgerblue".to_string()),
+                ..Default::default()
+            })),
+            active: Some(Box::new(UiStyle {
+                background: Some("darkred".to_string()),
+                ..Default::default()
+            })),
+            disabled: Some(Box::new(UiStyle {
+                opacity: Some(0.5),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let states = UiXmlStateStyles::from_style(&style);
+
+        assert_eq!(
+            states
+                .resolve(Interaction::Hovered, false)
+                .background
+                .as_deref(),
+            Some("dodgerblue")
+        );
+        assert_eq!(
+            states
+                .resolve(Interaction::Pressed, false)
+                .background
+                .as_deref(),
+            Some("darkred")
+        );
+        assert_eq!(
+            states.resolve(Interaction::Hovered, true).opacity,
+            Some(0.5)
         );
     }
 }

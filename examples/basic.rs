@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use bevy_ui_xml::UiXmlBuilder;
+use bevy_ui_xml::{UiXmlBuilder, UiXmlPlugin};
 
 const LAYOUT: &str = r#"
 <ui id="root" width="100%" height="100%">
@@ -31,7 +31,13 @@ const STYLES: &str = r##"
             "height": 44,
             "background": "royalblue",
             "color": "white",
-            "fontSize": 18
+            "fontSize": 18,
+            "hover": {
+                "background": "dodgerblue"
+            },
+            "active": {
+                "background": "darkred"
+            }
         },
         ".danger": {
             "background": "crimson"
@@ -50,7 +56,7 @@ const STYLES: &str = r##"
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins((DefaultPlugins, UiXmlPlugin))
         .add_systems(Startup, setup)
         .run();
 }
