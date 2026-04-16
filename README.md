@@ -30,12 +30,15 @@ Supported selectors:
   `UiXmlPlugin` is installed
 
 Supported style groups include sizing, padding, margin, border width/color,
-absolute/relative positioning, overflow clipping, aspect ratio, flex direction,
-wrap, align/justify, gaps, flex grow/shrink/basis, background, text color,
-font size, opacity, and display.
+outline width/color/offset, absolute/relative positioning, overflow clipping,
+aspect ratio, flex direction, wrap, align/justify, gaps, flex grow/shrink/basis,
+background, text color, font size, text alignment/wrap, opacity, visibility,
+z-index, and display.
 
 Unsupported JSON properties are recorded in `StyleSheet::diagnostics` instead
-of being silently ignored.
+of being silently ignored. Unsupported visual effects such as `boxShadow`,
+`borderRadius`, `filter`, and `backdropFilter` are also preserved on spawned
+entities as `UiXmlUnsupportedEffects` for a future custom material renderer.
 
 ## Example
 
@@ -67,6 +70,8 @@ const STYLES: &str = r##"
             "padding": {"all": 20},
             "border-width": {"all": 2},
             "border-color": "dodgerblue",
+            "outline-width": 1,
+            "outline-color": "gold",
             "gap": 12,
             "background": "#1f2937"
         },

@@ -24,6 +24,8 @@ const STYLES: &str = r##"
         ".card": {
             "width": 360,
             "padding": {"all": 20},
+            "outline-width": 1,
+            "outline-color": "dodgerblue",
             "gap": 12,
             "background": "#1f2937"
         },

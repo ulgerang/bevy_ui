@@ -5,6 +5,7 @@
 //! tree into Bevy.
 
 use bevy::prelude::*;
+use bevy::text::BreakLineOn;
 use roxmltree::Document;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -84,6 +85,19 @@ impl UiXmlStateStyles {
 
         style
     }
+}
+
+#[derive(Component, Debug, Clone, PartialEq)]
+pub struct UiXmlUnsupportedEffects {
+    pub effects: Vec<UnsupportedEffect>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnsupportedEffect {
+    BorderRadius(String),
+    BoxShadow(String),
+    Filter(String),
+    BackdropFilter(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -189,8 +203,19 @@ pub struct StyleSheet {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StyleDiagnostic {
-    UnsupportedProperty { selector: String, property: String },
-    InvalidSelector { selector: String, reason: String },
+    UnsupportedProperty {
+        selector: String,
+        property: String,
+    },
+    UnsupportedEffect {
+        selector: String,
+        property: String,
+        reason: String,
+    },
+    InvalidSelector {
+        selector: String,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -591,12 +616,37 @@ fn collect_style_diagnostics(
             continue;
         }
 
+        if let Some(reason) = unsupported_effect_reason(property) {
+            diagnostics.push(StyleDiagnostic::UnsupportedEffect {
+                selector: selector.to_string(),
+                property: property.clone(),
+                reason: reason.to_string(),
+            });
+            continue;
+        }
+
         if canonical_property_name(property).is_none() {
             diagnostics.push(StyleDiagnostic::UnsupportedProperty {
                 selector: selector.to_string(),
                 property: property.clone(),
             });
         }
+    }
+}
+
+fn unsupported_effect_reason(property: &str) -> Option<&'static str> {
+    match property {
+        "borderRadius" | "border-radius" => {
+            Some("Bevy UI 0.12 has no native rounded rectangle clipping")
+        }
+        "boxShadow" | "box-shadow" => {
+            Some("box shadows need a custom UI material or extra shadow geometry")
+        }
+        "filter" => Some("filters need a custom UI material shader"),
+        "backdropFilter" | "backdrop-filter" => {
+            Some("backdrop filters need a custom render pass/material")
+        }
+        _ => None,
     }
 }
 
@@ -645,7 +695,19 @@ fn canonical_property_name(property: &str) -> Option<&'static str> {
         "color" => Some("color"),
         "fontSize" | "font-size" => Some("fontSize"),
         "opacity" => Some("opacity"),
+        "outline" => Some("outline"),
+        "outlineWidth" | "outline-width" => Some("outlineWidth"),
+        "outlineColor" | "outline-color" => Some("outlineColor"),
+        "outlineOffset" | "outline-offset" => Some("outlineOffset"),
+        "zIndex" | "z-index" => Some("zIndex"),
+        "visibility" => Some("visibility"),
+        "textAlign" | "text-align" => Some("textAlign"),
+        "textWrap" | "text-wrap" => Some("textWrap"),
         "display" => Some("display"),
+        "borderRadius" | "border-radius" => Some("borderRadius"),
+        "boxShadow" | "box-shadow" => Some("boxShadow"),
+        "filter" => Some("filter"),
+        "backdropFilter" | "backdrop-filter" => Some("backdropFilter"),
         "hover" => Some("hover"),
         "active" => Some("active"),
         "focus" => Some("focus"),
@@ -803,6 +865,18 @@ pub struct UiStyle {
     pub color: Option<String>,
     pub font_size: Option<f32>,
     pub opacity: Option<f32>,
+    pub outline: Option<OutlineStyle>,
+    pub outline_width: Option<Length>,
+    pub outline_color: Option<String>,
+    pub outline_offset: Option<Length>,
+    pub z_index: Option<i32>,
+    pub visibility: Option<VisibilityValue>,
+    pub text_align: Option<TextAlignValue>,
+    pub text_wrap: Option<TextWrapValue>,
+    pub border_radius: Option<String>,
+    pub box_shadow: Option<String>,
+    pub filter: Option<String>,
+    pub backdrop_filter: Option<String>,
     pub display: Option<DisplayValue>,
     pub hover: Option<Box<UiStyle>>,
     pub active: Option<Box<UiStyle>>,
@@ -856,6 +930,18 @@ impl UiStyle {
         merge_field!(color);
         merge_field!(font_size);
         merge_field!(opacity);
+        merge_field!(outline);
+        merge_field!(outline_width);
+        merge_field!(outline_color);
+        merge_field!(outline_offset);
+        merge_field!(z_index);
+        merge_field!(visibility);
+        merge_field!(text_align);
+        merge_field!(text_wrap);
+        merge_field!(border_radius);
+        merge_field!(box_shadow);
+        merge_field!(filter);
+        merge_field!(backdrop_filter);
         merge_field!(display);
         merge_field!(hover);
         merge_field!(active);
@@ -1157,6 +1243,96 @@ impl OverflowValue {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum OutlineStyle {
+    Color(String),
+    Parts {
+        width: Option<Length>,
+        color: Option<String>,
+        offset: Option<Length>,
+    },
+}
+
+impl OutlineStyle {
+    fn width(&self) -> Option<Length> {
+        match self {
+            Self::Color(_) => None,
+            Self::Parts { width, .. } => width.clone(),
+        }
+    }
+
+    fn color(&self) -> Option<&str> {
+        match self {
+            Self::Color(color) => Some(color),
+            Self::Parts { color, .. } => color.as_deref(),
+        }
+    }
+
+    fn offset(&self) -> Option<Length> {
+        match self {
+            Self::Color(_) => None,
+            Self::Parts { offset, .. } => offset.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VisibilityValue {
+    Visible,
+    Hidden,
+    Inherited,
+}
+
+impl VisibilityValue {
+    fn to_bevy(self) -> Visibility {
+        match self {
+            Self::Visible => Visibility::Visible,
+            Self::Hidden => Visibility::Hidden,
+            Self::Inherited => Visibility::Inherited,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TextAlignValue {
+    Left,
+    Center,
+    Right,
+}
+
+impl TextAlignValue {
+    fn to_bevy(self) -> TextAlignment {
+        match self {
+            Self::Left => TextAlignment::Left,
+            Self::Center => TextAlignment::Center,
+            Self::Right => TextAlignment::Right,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TextWrapValue {
+    Normal,
+    WordBoundary,
+    AnyCharacter,
+    None,
+    NoWrap,
+}
+
+impl TextWrapValue {
+    fn to_bevy(self) -> BreakLineOn {
+        match self {
+            Self::Normal | Self::WordBoundary => BreakLineOn::WordBoundary,
+            Self::AnyCharacter => BreakLineOn::AnyCharacter,
+            Self::None | Self::NoWrap => BreakLineOn::NoWrap,
+        }
+    }
+}
+
 pub struct UiXmlPlugin;
 
 impl Plugin for UiXmlPlugin {
@@ -1169,19 +1345,32 @@ type InteractionStyleQuery<'w, 's> = Query<
     'w,
     's,
     (
+        Entity,
         &'static Interaction,
         &'static UiXmlStateStyles,
         &'static UiXmlElement,
         &'static mut Style,
         &'static mut BackgroundColor,
         &'static mut BorderColor,
+        Option<&'static mut Outline>,
     ),
     Changed<Interaction>,
 >;
 
-fn apply_interaction_styles(mut query: InteractionStyleQuery<'_, '_>) {
-    for (interaction, state_styles, element, mut bevy_style, mut background, mut border) in
-        &mut query
+fn apply_interaction_styles(
+    mut commands: Commands<'_, '_>,
+    mut query: InteractionStyleQuery<'_, '_>,
+) {
+    for (
+        entity,
+        interaction,
+        state_styles,
+        element,
+        mut bevy_style,
+        mut background,
+        mut border,
+        maybe_outline,
+    ) in &mut query
     {
         let resolved =
             state_styles.resolve(*interaction, element.attributes.contains_key("disabled"));
@@ -1196,6 +1385,19 @@ fn apply_interaction_styles(mut query: InteractionStyleQuery<'_, '_>) {
             Color::NONE,
             resolved.opacity,
         );
+        let outline = outline_from_style(&resolved);
+        match (maybe_outline, outline) {
+            (Some(mut current), Some(next)) => {
+                *current = next;
+            }
+            (None, Some(next)) => {
+                commands.entity(entity).insert(next);
+            }
+            (Some(mut current), None) => {
+                current.color = Color::NONE;
+            }
+            (None, None) => {}
+        }
     }
 }
 
@@ -1284,6 +1486,11 @@ fn spawn_node<'a>(
     let border_color = style_color(style.border_color.as_deref(), Color::NONE, style.opacity);
     let text_color = style_color(style.color.as_deref(), Color::WHITE, style.opacity);
     let font_size = style.font_size.unwrap_or(16.0);
+    let visibility = style
+        .visibility
+        .map(VisibilityValue::to_bevy)
+        .unwrap_or_default();
+    let z_index = style.z_index.map(ZIndex::Local).unwrap_or_default();
 
     match node.widget_type() {
         "button" => {
@@ -1292,11 +1499,14 @@ fn spawn_node<'a>(
                     style: bevy_style,
                     background_color: background.into(),
                     border_color: border_color.into(),
+                    visibility,
+                    z_index,
                     ..Default::default()
                 })
                 .insert(UiXmlElement::from(node))
                 .insert(UiXmlStateStyles::from_style(&style))
                 .id();
+            attach_optional_render_components(commands, entity, &style);
 
             let label = node.attr("label").unwrap_or(&node.text);
             if !label.trim().is_empty() {
@@ -1326,39 +1536,54 @@ fn spawn_node<'a>(
         }
         "text" => {
             let font = load_font(asset_server, default_font);
-            commands
+            let mut text = Text::from_section(
+                node.attr("content")
+                    .unwrap_or(&node.text)
+                    .trim()
+                    .to_string(),
+                TextStyle {
+                    font,
+                    font_size,
+                    color: text_color,
+                },
+            );
+            if let Some(text_align) = style.text_align {
+                text.alignment = text_align.to_bevy();
+            }
+            if let Some(text_wrap) = style.text_wrap {
+                text.linebreak_behavior = text_wrap.to_bevy();
+            }
+            let entity = commands
                 .spawn(TextBundle {
-                    text: Text::from_section(
-                        node.attr("content")
-                            .unwrap_or(&node.text)
-                            .trim()
-                            .to_string(),
-                        TextStyle {
-                            font,
-                            font_size,
-                            color: text_color,
-                        },
-                    ),
+                    text,
                     style: bevy_style,
                     background_color: background.into(),
+                    visibility,
+                    z_index,
                     ..Default::default()
                 })
                 .insert(UiXmlElement::from(node))
-                .id()
+                .id();
+            attach_optional_render_components(commands, entity, &style);
+            entity
         }
         "image" => {
             let image = node
                 .attr("src")
                 .map(|src| asset_server.load(src.to_string()));
-            commands
+            let entity = commands
                 .spawn(ImageBundle {
                     style: bevy_style,
                     image: image.map(UiImage::new).unwrap_or_default(),
                     background_color: background.into(),
+                    visibility,
+                    z_index,
                     ..Default::default()
                 })
                 .insert(UiXmlElement::from(node))
-                .id()
+                .id();
+            attach_optional_render_components(commands, entity, &style);
+            entity
         }
         _ => {
             let entity = commands
@@ -1366,10 +1591,13 @@ fn spawn_node<'a>(
                     style: bevy_style,
                     background_color: background.into(),
                     border_color: border_color.into(),
+                    visibility,
+                    z_index,
                     ..Default::default()
                 })
                 .insert(UiXmlElement::from(node))
                 .id();
+            attach_optional_render_components(commands, entity, &style);
             add_children(
                 commands,
                 asset_server,
@@ -1408,10 +1636,65 @@ fn add_children<'a>(
     ancestors.pop();
 }
 
+fn attach_optional_render_components(
+    commands: &mut Commands<'_, '_>,
+    entity: Entity,
+    style: &UiStyle,
+) {
+    if let Some(outline) = outline_from_style(style) {
+        commands.entity(entity).insert(outline);
+    }
+    if let Some(effects) = unsupported_effects_from_style(style) {
+        commands.entity(entity).insert(effects);
+    }
+}
+
 fn load_font(asset_server: &AssetServer, default_font: Option<&str>) -> Handle<Font> {
     default_font
         .map(|path| asset_server.load(path.to_string()))
         .unwrap_or_default()
+}
+
+fn outline_from_style(style: &UiStyle) -> Option<Outline> {
+    let width = style
+        .outline_width
+        .clone()
+        .or_else(|| style.outline.as_ref().and_then(OutlineStyle::width))
+        .map(Length::into_val)?;
+    let offset = style
+        .outline_offset
+        .clone()
+        .or_else(|| style.outline.as_ref().and_then(OutlineStyle::offset))
+        .map(Length::into_val)
+        .unwrap_or(Val::ZERO);
+    let color = style_color(
+        style
+            .outline_color
+            .as_deref()
+            .or_else(|| style.outline.as_ref().and_then(OutlineStyle::color)),
+        Color::WHITE,
+        style.opacity,
+    );
+
+    Some(Outline::new(width, offset, color))
+}
+
+fn unsupported_effects_from_style(style: &UiStyle) -> Option<UiXmlUnsupportedEffects> {
+    let mut effects = Vec::new();
+    if let Some(value) = &style.border_radius {
+        effects.push(UnsupportedEffect::BorderRadius(value.clone()));
+    }
+    if let Some(value) = &style.box_shadow {
+        effects.push(UnsupportedEffect::BoxShadow(value.clone()));
+    }
+    if let Some(value) = &style.filter {
+        effects.push(UnsupportedEffect::Filter(value.clone()));
+    }
+    if let Some(value) = &style.backdrop_filter {
+        effects.push(UnsupportedEffect::BackdropFilter(value.clone()));
+    }
+
+    (!effects.is_empty()).then_some(UiXmlUnsupportedEffects { effects })
 }
 
 fn to_bevy_style(style: &UiStyle) -> Style {
@@ -1879,7 +2162,14 @@ mod tests {
                         "align-self": "center",
                         "row-gap": 6,
                         "column-gap": "10px",
-                        "flex-basis": "25%"
+                        "flex-basis": "25%",
+                        "outline-width": 3,
+                        "outline-color": "gold",
+                        "outline-offset": 1,
+                        "z-index": 7,
+                        "visibility": "hidden",
+                        "text-align": "center",
+                        "text-wrap": "no-wrap"
                     }
                 }
             }"##,
@@ -1910,6 +2200,13 @@ mod tests {
         assert_eq!(style.row_gap, Some(Length::Px(6.0)));
         assert_eq!(style.column_gap, Some(Length::Text("10px".to_string())));
         assert_eq!(style.flex_basis, Some(Length::Text("25%".to_string())));
+        assert_eq!(style.outline_width, Some(Length::Px(3.0)));
+        assert_eq!(style.outline_color.as_deref(), Some("gold"));
+        assert_eq!(style.outline_offset, Some(Length::Px(1.0)));
+        assert_eq!(style.z_index, Some(7));
+        assert_eq!(style.visibility, Some(VisibilityValue::Hidden));
+        assert_eq!(style.text_align, Some(TextAlignValue::Center));
+        assert_eq!(style.text_wrap, Some(TextWrapValue::NoWrap));
     }
 
     #[test]
@@ -1931,12 +2228,38 @@ mod tests {
         assert_eq!(sheet.diagnostics.len(), 2);
         assert!(sheet.diagnostics.iter().any(|diagnostic| matches!(
             diagnostic,
-            StyleDiagnostic::UnsupportedProperty { property, .. } if property == "boxShadow"
+            StyleDiagnostic::UnsupportedEffect { property, .. } if property == "boxShadow"
         )));
         assert!(sheet.diagnostics.iter().any(|diagnostic| matches!(
             diagnostic,
-            StyleDiagnostic::UnsupportedProperty { property, .. } if property == "filter"
+            StyleDiagnostic::UnsupportedEffect { property, .. } if property == "filter"
         )));
+    }
+
+    #[test]
+    fn creates_native_outline_and_tracks_unsupported_effect_values() {
+        let style = UiStyle {
+            outline_width: Some(Length::Px(2.0)),
+            outline_color: Some("tomato".to_string()),
+            outline_offset: Some(Length::Px(3.0)),
+            box_shadow: Some("0 4px 8px black".to_string()),
+            border_radius: Some("8px".to_string()),
+            ..Default::default()
+        };
+
+        let outline = outline_from_style(&style).unwrap();
+        assert_eq!(outline.width, Val::Px(2.0));
+        assert_eq!(outline.offset, Val::Px(3.0));
+        assert_eq!(outline.color.as_rgba_u8(), [255, 99, 71, 255]);
+
+        let effects = unsupported_effects_from_style(&style).unwrap();
+        assert_eq!(effects.effects.len(), 2);
+        assert!(effects
+            .effects
+            .contains(&UnsupportedEffect::BoxShadow("0 4px 8px black".to_string())));
+        assert!(effects
+            .effects
+            .contains(&UnsupportedEffect::BorderRadius("8px".to_string())));
     }
 
     #[test]
