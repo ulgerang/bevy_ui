@@ -24,17 +24,15 @@ impl ElementNode {
 
     pub fn widget_type(&self) -> &str {
         if self.tag == "input" {
-            if self
-                .attr("type")
-                .is_some_and(|value| value.eq_ignore_ascii_case("checkbox"))
-            {
+            let input_type = self.attr("type").unwrap_or("text").trim();
+            if input_type.eq_ignore_ascii_case("checkbox") {
                 return "checkbox";
             }
-            if self
-                .attr("type")
-                .is_some_and(|value| value.eq_ignore_ascii_case("radio"))
-            {
+            if input_type.eq_ignore_ascii_case("radio") {
                 return "radio";
+            }
+            if input_type.is_empty() || input_type.eq_ignore_ascii_case("text") {
+                return "text-input";
             }
         }
         canonical_tag(&self.tag)
@@ -49,6 +47,7 @@ fn canonical_tag(tag: &str) -> &str {
         "image" | "img" => "image",
         "form" => "form",
         "input" => "input",
+        "text-input" => "text-input",
         "textarea" => "textarea",
         "select" => "select",
         "option" => "option",

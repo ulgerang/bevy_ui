@@ -20,7 +20,8 @@ pub use runtime::{
     UiXmlChecked, UiXmlControlChanged, UiXmlControlKind, UiXmlControlName, UiXmlControlScope,
     UiXmlControlValue, UiXmlDisabled, UiXmlDocumentOrder, UiXmlElement, UiXmlFocus, UiXmlForm,
     UiXmlPlugin, UiXmlRuntimeState, UiXmlSelectorContext, UiXmlSelectorContextCache,
-    UiXmlSelectorSnapshot, UiXmlStateStyles, UiXmlStyleRuntime, UiXmlStyleSource,
+    UiXmlSelectorSnapshot, UiXmlStateStyles, UiXmlStyleRuntime, UiXmlStyleSource, UiXmlTextChanged,
+    UiXmlTextDisplay, UiXmlTextInput, UiXmlTextValue,
 };
 pub use style::{
     AlignSelfValue, AlignValue, DisplayValue, EdgeSizes, FlexDirectionValue, FlexWrapValue,
@@ -44,7 +45,10 @@ mod tests {
     use crate::render_effects::{outline_from_style, unsupported_effects_from_style};
     use crate::selector::{Combinator, PseudoClass, Selector};
     use crate::style::parse_color;
+    use bevy::input::keyboard::{KeyCode, KeyboardInput};
+    use bevy::input::ButtonState;
     use bevy::prelude::*;
+    use bevy::window::ReceivedCharacter;
 
     #[test]
     fn parses_html_like_xml() {
@@ -703,8 +707,37 @@ mod tests {
             .collect()
     }
 
+    fn drain_text_events(app: &mut App) -> Vec<UiXmlTextChanged> {
+        app.world
+            .resource_mut::<Events<UiXmlTextChanged>>()
+            .drain()
+            .collect()
+    }
+
     fn press_control(app: &mut App, entity: Entity) {
         app.world.entity_mut(entity).insert(Interaction::Pressed);
+        app.update();
+    }
+
+    fn send_character(app: &mut App, character: char) {
+        app.world
+            .resource_mut::<Events<ReceivedCharacter>>()
+            .send(ReceivedCharacter {
+                window: Entity::from_raw(0),
+                char: character,
+            });
+        app.update();
+    }
+
+    fn send_key(app: &mut App, key_code: KeyCode) {
+        app.world
+            .resource_mut::<Events<KeyboardInput>>()
+            .send(KeyboardInput {
+                scan_code: 0,
+                key_code: Some(key_code),
+                state: ButtonState::Pressed,
+                window: Entity::from_raw(0),
+            });
         app.update();
     }
 
@@ -794,6 +827,8 @@ mod tests {
                 <input id="small" type="radio" name="size" />
                 <radio id="large" />
                 <input id="email" type="text" placeholder="Email" />
+                <input id="plain" />
+                <input id="range" type="range" />
             </form>
             "#,
         )
@@ -808,8 +843,28 @@ mod tests {
         assert_eq!(children[2].tag, "input");
         assert_eq!(children[2].widget_type(), "radio");
         assert_eq!(children[3].widget_type(), "radio");
-        assert_eq!(children[4].widget_type(), "input");
+        assert_eq!(children[4].widget_type(), "text-input");
         assert_eq!(children[4].attr("placeholder"), Some("Email"));
+        assert_eq!(children[5].widget_type(), "text-input");
+        assert_eq!(children[6].widget_type(), "input");
+    }
+
+    #[test]
+    fn text_inputs_keep_input_tag_selector_compatibility() {
+        let doc = parse_layout(r#"<input id="email" type="text" />"#).unwrap();
+        let sheet = StyleSheet::parse(
+            r##"{
+                "styles": {
+                    "input": {"width": 200},
+                    "text-input": {"height": 40}
+                }
+            }"##,
+        )
+        .unwrap();
+
+        let style = sheet.computed_style(&doc.root);
+        assert_eq!(style.width, Some(Length::Px(200.0)));
+        assert_eq!(style.height, Some(Length::Px(40.0)));
     }
 
     #[test]
@@ -1082,33 +1137,159 @@ mod tests {
     }
 
     #[test]
-    fn forms_controls_non_checkbox_radio_input_remains_metadata_only() {
+    fn text_inputs_are_executable_and_other_inputs_remain_metadata_only() {
         let mut app = spawn_test_app(
             r#"
             <ui id="root">
                 <input id="email" type="text" name="email" value="hello@example.com" />
+                <input id="volume" type="range" value="7" />
             </ui>
             "#,
             r#"{}"#,
         );
         drain_control_events(&mut app);
+        drain_text_events(&mut app);
 
+        let root = entity_by_id(&mut app, "root");
         let email = entity_by_id(&mut app, "email");
         let email_entity = app.world.entity(email);
         let element = email_entity.get::<UiXmlElement>().unwrap();
 
         assert_eq!(element.tag, "input");
-        assert_eq!(element.widget_type, "input");
+        assert_eq!(element.widget_type, "text-input");
         assert_eq!(
             element.attributes.get("type").map(String::as_str),
             Some("text")
+        );
+        assert!(email_entity.contains::<UiXmlTextInput>());
+        assert_eq!(
+            email_entity
+                .get::<UiXmlTextValue>()
+                .map(|value| value.0.as_str()),
+            Some("hello@example.com")
+        );
+        assert_eq!(
+            email_entity
+                .get::<UiXmlControlName>()
+                .map(|name| name.0.as_str()),
+            Some("email")
+        );
+        assert_eq!(
+            email_entity.get::<UiXmlControlScope>(),
+            Some(&UiXmlControlScope(root))
         );
         assert!(!email_entity.contains::<UiXmlControlKind>());
         assert!(!email_entity.contains::<UiXmlChecked>());
         assert!(!email_entity.contains::<UiXmlControlValue>());
 
+        let volume = entity_by_id(&mut app, "volume");
+        let volume_entity = app.world.entity(volume);
+        let volume_element = volume_entity.get::<UiXmlElement>().unwrap();
+        assert_eq!(volume_element.widget_type, "input");
+        assert!(!volume_entity.contains::<UiXmlTextInput>());
+        assert!(!volume_entity.contains::<UiXmlTextValue>());
+        assert!(!volume_entity.contains::<UiXmlControlKind>());
+
         app.update();
         assert!(drain_control_events(&mut app).is_empty());
+        assert!(drain_text_events(&mut app).is_empty());
+    }
+
+    #[test]
+    fn text_input_focus_keyboard_updates_value_display_and_emits_events() {
+        let mut app = spawn_test_app(
+            r#"
+            <ui id="root">
+                <input id="email" type="text" name="email" value="hi" />
+            </ui>
+            "#,
+            r#"{}"#,
+        );
+        assert!(drain_text_events(&mut app).is_empty());
+
+        let root = entity_by_id(&mut app, "root");
+        let email = entity_by_id(&mut app, "email");
+        app.world.resource_mut::<UiXmlFocus>().entity = Some(email);
+
+        send_character(&mut app, '!');
+        let character_events = drain_text_events(&mut app);
+        assert_eq!(
+            app.world
+                .entity(email)
+                .get::<UiXmlTextValue>()
+                .map(|value| value.0.as_str()),
+            Some("hi!")
+        );
+        assert_eq!(character_events.len(), 1);
+        assert_eq!(character_events[0].entity, email);
+        assert_eq!(character_events[0].scope, root);
+        assert_eq!(character_events[0].name.as_deref(), Some("email"));
+        assert_eq!(character_events[0].previous_value, "hi");
+        assert_eq!(character_events[0].value, "hi!");
+
+        let display = app.world.entity(email).get::<UiXmlTextDisplay>().unwrap().0;
+        assert_eq!(
+            app.world.entity(display).get::<Text>().unwrap().sections[0].value,
+            "hi!"
+        );
+
+        send_key(&mut app, KeyCode::Back);
+        let key_events = drain_text_events(&mut app);
+        assert_eq!(
+            app.world
+                .entity(email)
+                .get::<UiXmlTextValue>()
+                .map(|value| value.0.as_str()),
+            Some("hi")
+        );
+        assert_eq!(key_events.len(), 1);
+        assert_eq!(key_events[0].previous_value, "hi!");
+        assert_eq!(key_events[0].value, "hi");
+        assert_eq!(
+            app.world.entity(display).get::<Text>().unwrap().sections[0].value,
+            "hi"
+        );
+    }
+
+    #[test]
+    fn text_input_click_sets_focus_and_disabled_input_ignores_keyboard() {
+        let mut app = spawn_test_app(
+            r#"
+            <ui id="root">
+                <input id="email" type="text" value="hi" />
+                <input id="blocked" type="text" value="locked" disabled="true" />
+            </ui>
+            "#,
+            r#"{}"#,
+        );
+        assert!(drain_text_events(&mut app).is_empty());
+
+        let email = entity_by_id(&mut app, "email");
+        app.world.entity_mut(email).insert(Interaction::Pressed);
+        app.update();
+        assert_eq!(app.world.resource::<UiXmlFocus>().entity, Some(email));
+
+        send_character(&mut app, '?');
+        assert_eq!(
+            app.world
+                .entity(email)
+                .get::<UiXmlTextValue>()
+                .map(|value| value.0.as_str()),
+            Some("hi?")
+        );
+        assert_eq!(drain_text_events(&mut app).len(), 1);
+
+        let blocked = entity_by_id(&mut app, "blocked");
+        app.world.resource_mut::<UiXmlFocus>().entity = Some(blocked);
+        send_character(&mut app, '!');
+        assert_eq!(
+            app.world
+                .entity(blocked)
+                .get::<UiXmlTextValue>()
+                .map(|value| value.0.as_str()),
+            Some("locked")
+        );
+        assert!(drain_text_events(&mut app).is_empty());
     }
 
     #[test]

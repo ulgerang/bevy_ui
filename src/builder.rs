@@ -2,7 +2,8 @@ use crate::render_effects::{outline_from_style, unsupported_effects_from_style};
 use crate::runtime::{
     UiXmlChecked, UiXmlControlKind, UiXmlControlName, UiXmlControlScope, UiXmlControlValue,
     UiXmlDisabled, UiXmlDocumentOrder, UiXmlElement, UiXmlForm, UiXmlRuntimeState,
-    UiXmlSelectorContext, UiXmlStateStyles, UiXmlStyleSource,
+    UiXmlSelectorContext, UiXmlStateStyles, UiXmlStyleSource, UiXmlTextDisplay, UiXmlTextInput,
+    UiXmlTextValue,
 };
 use crate::selector::PseudoClass;
 use crate::style::{style_color, to_bevy_style, StyleSheet, UiStyle, VisibilityValue};
@@ -194,6 +195,60 @@ fn spawn_node<'a>(
             );
             entity
         }
+        "text-input" => {
+            let entity = commands
+                .spawn(ButtonBundle {
+                    style: bevy_style,
+                    background_color: background.into(),
+                    border_color: border_color.into(),
+                    visibility,
+                    z_index,
+                    ..Default::default()
+                })
+                .insert(UiXmlElement::from(node))
+                .insert(disabled)
+                .insert(runtime_state)
+                .insert(style_source)
+                .insert(selector_context)
+                .insert(UiXmlStateStyles::from_runtime_styles(
+                    &style,
+                    &hover_style,
+                    &active_style,
+                    &focus_style,
+                    &disabled_style,
+                ))
+                .insert(UiXmlTextInput)
+                .insert(UiXmlTextValue(
+                    node.attr("value").unwrap_or_default().to_string(),
+                ))
+                .id();
+            attach_optional_render_components(commands, entity, &style);
+            attach_widget_metadata(commands, entity, node, current_scope, order);
+
+            let font = load_font(resources.asset_server, resources.default_font);
+            let mut display_entity = None;
+            commands.entity(entity).with_children(|parent| {
+                display_entity = Some(
+                    parent
+                        .spawn(TextBundle::from_section(
+                            node.attr("value").unwrap_or_default().to_string(),
+                            TextStyle {
+                                font,
+                                font_size,
+                                color: text_color,
+                            },
+                        ))
+                        .id(),
+                );
+            });
+            if let Some(display_entity) = display_entity {
+                commands
+                    .entity(entity)
+                    .insert(UiXmlTextDisplay(display_entity));
+            }
+
+            entity
+        }
         "text" => {
             let font = load_font(resources.asset_server, resources.default_font);
             let mut text = Text::from_section(
@@ -336,6 +391,7 @@ fn attach_widget_metadata(
     }
 
     let Some(kind) = control_kind(node) else {
+        attach_text_input_metadata(commands, entity, node, current_scope);
         return;
     };
 
@@ -348,6 +404,28 @@ fn attach_widget_metadata(
             node.attr("value").unwrap_or("on").to_string(),
         ))
         .insert(UiXmlControlScope(scope));
+
+    if let Some(name) = node
+        .attr("name")
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        entity_commands.insert(UiXmlControlName(name.to_string()));
+    }
+}
+
+fn attach_text_input_metadata(
+    commands: &mut Commands<'_, '_>,
+    entity: Entity,
+    node: &ElementNode,
+    current_scope: Option<Entity>,
+) {
+    if node.widget_type() != "text-input" {
+        return;
+    }
+
+    let mut entity_commands = commands.entity(entity);
+    entity_commands.insert(UiXmlControlScope(current_scope.unwrap_or(entity)));
 
     if let Some(name) = node
         .attr("name")

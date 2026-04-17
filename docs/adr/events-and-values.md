@@ -41,8 +41,7 @@ Radios without a non-empty name are independent and are not grouped with each ot
 
 ## Deferred
 
-- Free text input.
-- Keyboard input or routing.
+- Text input is covered by `docs/adr/text-input.md`.
 - Validation.
 - Reset behavior.
 - Submit behavior.

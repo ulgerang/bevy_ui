@@ -1,7 +1,10 @@
 use crate::render_effects::outline_from_style;
 use crate::style::{style_color, to_bevy_style, UiStyle};
 use crate::ElementNode;
+use bevy::input::keyboard::{KeyCode, KeyboardInput};
+use bevy::input::ButtonState;
 use bevy::prelude::*;
+use bevy::window::ReceivedCharacter;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
@@ -49,6 +52,24 @@ pub struct UiXmlControlChanged {
     pub value: String,
     pub checked: bool,
     pub previous_checked: bool,
+}
+
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UiXmlTextInput;
+
+#[derive(Component, Debug, Clone, PartialEq, Eq, Default)]
+pub struct UiXmlTextValue(pub String);
+
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UiXmlTextDisplay(pub Entity);
+
+#[derive(Event, Debug, Clone, PartialEq, Eq)]
+pub struct UiXmlTextChanged {
+    pub entity: Entity,
+    pub scope: Entity,
+    pub name: Option<String>,
+    pub previous_value: String,
+    pub value: String,
 }
 
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -267,6 +288,9 @@ pub struct UiXmlPlugin;
 impl Plugin for UiXmlPlugin {
     fn build(&self, app: &mut App) {
         app.add_event::<UiXmlControlChanged>()
+            .add_event::<UiXmlTextChanged>()
+            .add_event::<ReceivedCharacter>()
+            .add_event::<KeyboardInput>()
             .init_resource::<UiXmlStyleRuntime>()
             .init_resource::<UiXmlFocus>()
             .init_resource::<UiXmlSelectorContextCache>()
@@ -276,7 +300,10 @@ impl Plugin for UiXmlPlugin {
                     register_selector_contexts,
                     mark_style_runtime_generation,
                     normalize_initial_radio_groups,
+                    focus_pressed_text_inputs,
                     apply_control_interactions,
+                    apply_text_input,
+                    sync_text_display,
                     sync_runtime_state,
                     apply_interaction_styles,
                 )
@@ -490,6 +517,131 @@ fn control_value(value: Option<&UiXmlControlValue>) -> String {
     value
         .map(|value| value.0.clone())
         .unwrap_or_else(|| "on".to_string())
+}
+
+type TextFocusInteractionQuery<'w, 's> = Query<
+    'w,
+    's,
+    (Entity, &'static Interaction, &'static UiXmlDisabled),
+    (With<UiXmlTextInput>, Changed<Interaction>),
+>;
+
+fn focus_pressed_text_inputs(
+    mut focus: ResMut<UiXmlFocus>,
+    query: TextFocusInteractionQuery<'_, '_>,
+) {
+    for (entity, interaction, disabled) in &query {
+        if *interaction == Interaction::Pressed && !disabled.0 {
+            focus.entity = Some(entity);
+        }
+    }
+}
+
+type TextInputMutationQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static UiXmlDisabled,
+        &'static mut UiXmlTextValue,
+        Option<&'static UiXmlControlScope>,
+        Option<&'static UiXmlControlName>,
+    ),
+    With<UiXmlTextInput>,
+>;
+
+fn apply_text_input(
+    focus: Res<UiXmlFocus>,
+    mut received_characters: EventReader<ReceivedCharacter>,
+    mut keyboard_inputs: EventReader<KeyboardInput>,
+    mut events: EventWriter<UiXmlTextChanged>,
+    mut query: TextInputMutationQuery<'_, '_>,
+) {
+    let Some(entity) = focus.entity else {
+        received_characters.clear();
+        keyboard_inputs.clear();
+        return;
+    };
+
+    let Ok((disabled, mut value, scope, name)) = query.get_mut(entity) else {
+        received_characters.clear();
+        keyboard_inputs.clear();
+        return;
+    };
+
+    if disabled.0 {
+        received_characters.clear();
+        keyboard_inputs.clear();
+        return;
+    }
+
+    for received in received_characters.read() {
+        if received.char.is_control() {
+            continue;
+        }
+        let previous_value = value.0.clone();
+        value.0.push(received.char);
+        send_text_changed(
+            &mut events,
+            entity,
+            scope,
+            name,
+            previous_value,
+            value.0.clone(),
+        );
+    }
+
+    for input in keyboard_inputs.read() {
+        if input.state != ButtonState::Pressed {
+            continue;
+        }
+        if input.key_code != Some(KeyCode::Back) {
+            continue;
+        }
+        if value.0.is_empty() {
+            continue;
+        }
+        let previous_value = value.0.clone();
+        value.0.pop();
+        send_text_changed(
+            &mut events,
+            entity,
+            scope,
+            name,
+            previous_value,
+            value.0.clone(),
+        );
+    }
+}
+
+fn send_text_changed(
+    events: &mut EventWriter<UiXmlTextChanged>,
+    entity: Entity,
+    scope: Option<&UiXmlControlScope>,
+    name: Option<&UiXmlControlName>,
+    previous_value: String,
+    value: String,
+) {
+    events.send(UiXmlTextChanged {
+        entity,
+        scope: scope.map(|scope| scope.0).unwrap_or(entity),
+        name: name.cloned().map(|name| name.0),
+        previous_value,
+        value,
+    });
+}
+
+type TextDisplaySyncQuery<'w, 's> =
+    Query<'w, 's, (&'static UiXmlTextValue, &'static UiXmlTextDisplay), Changed<UiXmlTextValue>>;
+
+fn sync_text_display(value_query: TextDisplaySyncQuery<'_, '_>, mut text_query: Query<&mut Text>) {
+    for (value, display) in &value_query {
+        let Ok(mut text) = text_query.get_mut(display.0) else {
+            continue;
+        };
+        if let Some(section) = text.sections.first_mut() {
+            section.value = value.0.clone();
+        }
+    }
 }
 
 type SelectorContextRegistrationQuery<'w, 's> = Query<

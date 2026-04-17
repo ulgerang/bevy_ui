@@ -21,8 +21,9 @@ Supported elements:
 - `<form>` as a control scope
 - `<input type="checkbox">`, `<checkbox>`, `<input type="radio">`, and
   `<radio>` as bounded interactive controls
-- other `<input>`, `<textarea>`, `<select>`, and `<option>`-style form nodes
-  as structural metadata only
+- `<input type="text">` and `<input>` as bounded text controls
+- other `<input>`, `<textarea>`, `<select>`, and `<option>`-style form nodes as
+  structural metadata only
 
 Supported selectors:
 
@@ -49,6 +50,18 @@ Bounded controls:
 - Radios without a non-empty `name` are independent.
 - Multiple initially checked radios in the same group normalize to the last
   radio in document order without emitting events.
+
+Text inputs:
+
+- XML `value`, `name`, and `disabled` seed Bevy components during spawn; after
+  spawn, components are the source of truth.
+- `UiXmlTextValue` owns the mutable text value.
+- `UiXmlTextInput` identifies executable text controls.
+- `UiXmlTextChanged` is emitted only for crate-handled text edits.
+- Only the entity in `UiXmlFocus.entity` receives keyboard text.
+- Clicking a non-disabled text input sets `UiXmlFocus.entity`.
+- `ReceivedCharacter` appends non-control characters; `KeyCode::Back` removes
+  the last character.
 
 ```rust
 use bevy::prelude::*;
@@ -104,8 +117,10 @@ Runtime state styling is intentionally Bevy-scoped. XML `disabled` seeds a
 mutable `UiXmlDisabled` component during spawn; after that, the component is the
 source of truth. Runtime `:focus` styling uses the crate-owned `UiXmlFocus`
 resource; set `UiXmlFocus.entity` to the focused entity. Disabled entities do
-not become effectively focused. Text input, keyboard routing, validation, reset,
-submit behavior, and full form serialization are not implemented.
+not become effectively focused. Text input supports a bounded focused-editing
+MVP. Cursor movement, text selection, IME/composition, placeholder rendering,
+validation, reset, submit behavior, and full form serialization are not
+implemented.
 
 ## Example
 
