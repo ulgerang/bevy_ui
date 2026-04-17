@@ -38,21 +38,143 @@ struct StyleRule {
 }
 fn normalize_style_value(value: &serde_json::Value) -> serde_json::Value {
     match value {
-        serde_json::Value::Object(object) => serde_json::Value::Object(
-            object
-                .iter()
-                .map(|(key, value)| {
-                    (
-                        canonical_property_name(key).unwrap_or(key).to_string(),
-                        normalize_style_value(value),
-                    )
-                })
-                .collect(),
-        ),
+        serde_json::Value::Object(object) => normalize_style_object(object),
         serde_json::Value::Array(values) => {
             serde_json::Value::Array(values.iter().map(normalize_style_value).collect())
         }
         value => value.clone(),
+    }
+}
+
+fn normalize_style_object(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Value {
+    let mut normalized = serde_json::Map::new();
+
+    for (key, value) in object {
+        let canonical = canonical_property_name(key).unwrap_or(key);
+        match canonical {
+            "inset" => expand_box_sides(&mut normalized, ["top", "right", "bottom", "left"], value),
+            "flex" => {
+                if let Some((grow, shrink, basis)) = parse_flex_shorthand_value(value) {
+                    normalized.insert("flexGrow".to_string(), serde_json::json!(grow));
+                    normalized.insert("flexShrink".to_string(), serde_json::json!(shrink));
+                    normalized.insert("flexBasis".to_string(), basis);
+                }
+            }
+            "borderTopWidth" => insert_edge_side(&mut normalized, "borderWidth", "top", value),
+            "borderRightWidth" => insert_edge_side(&mut normalized, "borderWidth", "right", value),
+            "borderBottomWidth" => {
+                insert_edge_side(&mut normalized, "borderWidth", "bottom", value)
+            }
+            "borderLeftWidth" => insert_edge_side(&mut normalized, "borderWidth", "left", value),
+            _ => {
+                normalized.insert(canonical.to_string(), normalize_style_value(value));
+            }
+        }
+    }
+
+    serde_json::Value::Object(normalized)
+}
+
+fn expand_box_sides(
+    normalized: &mut serde_json::Map<String, serde_json::Value>,
+    keys: [&str; 4],
+    value: &serde_json::Value,
+) {
+    let values = edge_shorthand_values(value);
+    for (key, value) in keys.into_iter().zip(values) {
+        normalized.insert(key.to_string(), normalize_style_value(&value));
+    }
+}
+
+fn edge_shorthand_values(value: &serde_json::Value) -> [serde_json::Value; 4] {
+    if let serde_json::Value::Array(values) = value {
+        match values.as_slice() {
+            [all] => return [all.clone(), all.clone(), all.clone(), all.clone()],
+            [vertical, horizontal] => {
+                return [
+                    vertical.clone(),
+                    horizontal.clone(),
+                    vertical.clone(),
+                    horizontal.clone(),
+                ];
+            }
+            [top, horizontal, bottom] => {
+                return [
+                    top.clone(),
+                    horizontal.clone(),
+                    bottom.clone(),
+                    horizontal.clone(),
+                ];
+            }
+            [top, right, bottom, left, ..] => {
+                return [top.clone(), right.clone(), bottom.clone(), left.clone()];
+            }
+            [] => {}
+        }
+    }
+
+    [value.clone(), value.clone(), value.clone(), value.clone()]
+}
+
+fn insert_edge_side(
+    normalized: &mut serde_json::Map<String, serde_json::Value>,
+    edge_key: &str,
+    side: &str,
+    value: &serde_json::Value,
+) {
+    let entry = normalized
+        .entry(edge_key.to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if !entry.is_object() {
+        *entry = serde_json::Value::Object(serde_json::Map::new());
+    }
+    if let Some(object) = entry.as_object_mut() {
+        object.insert(side.to_string(), normalize_style_value(value));
+    }
+}
+
+fn parse_flex_shorthand_value(value: &serde_json::Value) -> Option<(f32, f32, serde_json::Value)> {
+    match value {
+        serde_json::Value::Number(number) => Some((
+            number.as_f64()? as f32,
+            1.0,
+            serde_json::Value::String("0%".to_string()),
+        )),
+        serde_json::Value::String(value) => parse_flex_shorthand(value),
+        _ => None,
+    }
+}
+
+fn parse_flex_shorthand(value: &str) -> Option<(f32, f32, serde_json::Value)> {
+    let trimmed = value.trim();
+    if trimmed.eq_ignore_ascii_case("none") {
+        return Some((0.0, 0.0, serde_json::Value::String("auto".to_string())));
+    }
+    if trimmed.eq_ignore_ascii_case("auto") {
+        return Some((1.0, 1.0, serde_json::Value::String("auto".to_string())));
+    }
+    if let Ok(grow) = trimmed.parse::<f32>() {
+        return Some((grow, 1.0, serde_json::Value::String("0%".to_string())));
+    }
+
+    let parts = trimmed.split_whitespace().collect::<Vec<_>>();
+    match parts.as_slice() {
+        [grow, basis] => {
+            let grow = grow.parse::<f32>().ok()?;
+            if let Ok(shrink) = basis.parse::<f32>() {
+                Some((grow, shrink, serde_json::Value::String("0%".to_string())))
+            } else {
+                Some((grow, 1.0, serde_json::Value::String((*basis).to_string())))
+            }
+        }
+        [grow, shrink, basis] => Some((
+            grow.parse::<f32>().ok()?,
+            shrink.parse::<f32>().ok()?,
+            serde_json::Value::String((*basis).to_string()),
+        )),
+        _ => None,
     }
 }
 
@@ -66,6 +188,11 @@ fn collect_style_diagnostics(
     };
 
     for (property, nested) in object {
+        if property == "placeholder" {
+            collect_style_diagnostics(selector, nested, diagnostics);
+            continue;
+        }
+
         if let Some(state) = matches_state_property(property) {
             collect_style_diagnostics(selector, nested, diagnostics);
             if canonical_property_name(state).is_none() {
@@ -74,6 +201,14 @@ fn collect_style_diagnostics(
                     property: property.clone(),
                 });
             }
+            continue;
+        }
+
+        if property == "flex" && parse_flex_shorthand_value(nested).is_none() {
+            diagnostics.push(StyleDiagnostic::UnsupportedProperty {
+                selector: selector.to_string(),
+                property: property.clone(),
+            });
             continue;
         }
 
@@ -113,7 +248,9 @@ fn unsupported_effect_reason(property: &str) -> Option<&'static str> {
 
 fn matches_state_property(property: &str) -> Option<&str> {
     match property {
-        "hover" | "active" | "focus" | "disabled" => Some(property),
+        "hover" | "active" | "focus" | "disabled" | "checked" => Some(property),
+        "focusWithin" | "focus-within" => Some("focusWithin"),
+        "focusVisible" | "focus-visible" => Some("focusVisible"),
         _ => None,
     }
 }
@@ -130,8 +267,17 @@ fn canonical_property_name(property: &str) -> Option<&'static str> {
         "margin" => Some("margin"),
         "border" => Some("border"),
         "borderWidth" | "border-width" => Some("borderWidth"),
+        "borderTopWidth" | "border-top-width" => Some("borderTopWidth"),
+        "borderRightWidth" | "border-right-width" => Some("borderRightWidth"),
+        "borderBottomWidth" | "border-bottom-width" => Some("borderBottomWidth"),
+        "borderLeftWidth" | "border-left-width" => Some("borderLeftWidth"),
         "borderColor" | "border-color" => Some("borderColor"),
+        "borderTopColor" | "border-top-color" => Some("borderTopColor"),
+        "borderRightColor" | "border-right-color" => Some("borderRightColor"),
+        "borderBottomColor" | "border-bottom-color" => Some("borderBottomColor"),
+        "borderLeftColor" | "border-left-color" => Some("borderLeftColor"),
         "position" => Some("position"),
+        "inset" => Some("inset"),
         "left" => Some("left"),
         "right" => Some("right"),
         "top" => Some("top"),
@@ -152,9 +298,13 @@ fn canonical_property_name(property: &str) -> Option<&'static str> {
         "flexGrow" | "flex-grow" => Some("flexGrow"),
         "flexShrink" | "flex-shrink" => Some("flexShrink"),
         "flexBasis" | "flex-basis" => Some("flexBasis"),
+        "flex" => Some("flex"),
         "background" | "backgroundColor" | "background-color" => Some("background"),
         "color" => Some("color"),
         "fontSize" | "font-size" => Some("fontSize"),
+        "fontFamily" | "font-family" => Some("fontFamily"),
+        "fontWeight" | "font-weight" => Some("fontWeight"),
+        "fontStyle" | "font-style" => Some("fontStyle"),
         "opacity" => Some("opacity"),
         "outline" => Some("outline"),
         "outlineWidth" | "outline-width" => Some("outlineWidth"),
@@ -165,6 +315,7 @@ fn canonical_property_name(property: &str) -> Option<&'static str> {
         "textAlign" | "text-align" => Some("textAlign"),
         "textWrap" | "text-wrap" => Some("textWrap"),
         "display" => Some("display"),
+        "placeholder" => Some("placeholder"),
         "borderRadius" | "border-radius" => Some("borderRadius"),
         "boxShadow" | "box-shadow" => Some("boxShadow"),
         "filter" => Some("filter"),
@@ -172,6 +323,9 @@ fn canonical_property_name(property: &str) -> Option<&'static str> {
         "hover" => Some("hover"),
         "active" => Some("active"),
         "focus" => Some("focus"),
+        "checked" => Some("checked"),
+        "focusWithin" | "focus-within" => Some("focusWithin"),
+        "focusVisible" | "focus-visible" => Some("focusVisible"),
         "disabled" => Some("disabled"),
         _ => None,
     }
@@ -179,7 +333,19 @@ fn canonical_property_name(property: &str) -> Option<&'static str> {
 
 impl StyleSheet {
     pub fn parse(input: &str) -> Result<Self, BevyUiXmlError> {
-        let value: serde_json::Value = serde_json::from_str(input)?;
+        let value: serde_json::Value = match serde_json::from_str(input) {
+            Ok(value) => value,
+            Err(json_error) => parse_css_stylesheet(input).unwrap_or_else(|| {
+                serde_json::Value::Object({
+                    let mut object = serde_json::Map::new();
+                    object.insert(
+                        "__invalid_css__".to_string(),
+                        serde_json::json!({ "__parse_error__": json_error.to_string() }),
+                    );
+                    object
+                })
+            }),
+        };
 
         let styles_value = value.get("styles").unwrap_or(&value);
         let Some(styles_object) = styles_value.as_object() else {
@@ -192,20 +358,32 @@ impl StyleSheet {
 
         for (order, (selector, style_value)) in styles_object.iter().enumerate() {
             collect_style_diagnostics(selector, style_value, &mut diagnostics);
-            let style: UiStyle = serde_json::from_value(normalize_style_value(style_value))?;
+            let (selector, style_value) =
+                normalize_pseudo_element_style(selector, style_value.clone());
+            let style: UiStyle = serde_json::from_value(normalize_style_value(&style_value))?;
             styles.insert(selector.clone(), style.clone());
 
-            match Selector::parse(selector) {
-                Some(selector) => rules.push(StyleRule {
-                    specificity: selector.specificity(),
-                    order,
-                    selector,
-                    style,
-                }),
-                None => diagnostics.push(StyleDiagnostic::InvalidSelector {
+            let group_members = Selector::parse_group(&selector);
+            if group_members.is_empty() {
+                diagnostics.push(StyleDiagnostic::InvalidSelector {
                     selector: selector.clone(),
                     reason: "empty selector".to_string(),
-                }),
+                });
+                continue;
+            }
+            for (group_index, member) in group_members.into_iter().enumerate() {
+                match member {
+                    Ok(selector) => rules.push(StyleRule {
+                        specificity: selector.specificity(),
+                        order: order * 1024 + group_index,
+                        selector,
+                        style: style.clone(),
+                    }),
+                    Err(reason) => diagnostics.push(StyleDiagnostic::InvalidSelector {
+                        selector: selector.clone(),
+                        reason,
+                    }),
+                }
             }
         }
 
@@ -245,6 +423,18 @@ impl StyleSheet {
             self.legacy_computed_style(path.last().copied())
         } else {
             self.rule_computed_style(path, Some(state), true)
+        }
+    }
+
+    pub(crate) fn runtime_ancestor_state_style_for_path(
+        &self,
+        path: &[&ElementNode],
+        state: PseudoClass,
+    ) -> UiStyle {
+        if self.rules.is_empty() {
+            UiStyle::default()
+        } else {
+            self.rule_computed_ancestor_state_style(path, state)
         }
     }
 
@@ -294,6 +484,11 @@ impl StyleSheet {
         let mut matched = self
             .rules
             .iter()
+            .filter(|rule| {
+                !runtime_state_mode
+                    || state.is_none()
+                    || state.is_some_and(|state| rule.selector.has_terminal_pseudo(state))
+            })
             .filter_map(|rule| {
                 rule.selector
                     .matches_with_state(path, state, runtime_state_mode)
@@ -310,6 +505,151 @@ impl StyleSheet {
         style.apply_inline_attributes(node);
         style
     }
+
+    fn rule_computed_ancestor_state_style(
+        &self,
+        path: &[&ElementNode],
+        state: PseudoClass,
+    ) -> UiStyle {
+        let Some(node) = path.last().copied() else {
+            return UiStyle::default();
+        };
+
+        let mut matched = self
+            .rules
+            .iter()
+            .filter_map(|rule| {
+                rule.selector
+                    .matches_with_ancestor_state(path, state)
+                    .map(|bonus| (rule.specificity + bonus, rule.order, &rule.style))
+            })
+            .collect::<Vec<_>>();
+
+        matched.sort_by_key(|(specificity, order, _)| (*specificity, *order));
+
+        let mut style = UiStyle::default();
+        for (_, _, rule_style) in matched {
+            style.merge(rule_style);
+        }
+        style.apply_inline_attributes(node);
+        style
+    }
+}
+
+fn normalize_pseudo_element_style(
+    selector: &str,
+    style_value: serde_json::Value,
+) -> (String, serde_json::Value) {
+    let Some(base_selector) = selector.strip_suffix("::placeholder") else {
+        return (selector.to_string(), style_value);
+    };
+
+    let mut wrapped = serde_json::Map::new();
+    wrapped.insert("placeholder".to_string(), style_value);
+    (
+        base_selector.trim().to_string(),
+        serde_json::Value::Object(wrapped),
+    )
+}
+
+fn parse_css_stylesheet(input: &str) -> Option<serde_json::Value> {
+    let input = strip_css_comments(input);
+    let mut styles = serde_json::Map::new();
+    let mut rest = input.as_str();
+
+    while let Some(open) = rest.find('{') {
+        let selector = rest[..open].trim();
+        let after_open = &rest[open + 1..];
+        let close = after_open.find('}')?;
+        let body = &after_open[..close];
+        rest = &after_open[close + 1..];
+        if selector.is_empty() {
+            continue;
+        }
+        styles.insert(selector.to_string(), parse_css_declarations(body));
+    }
+
+    (!styles.is_empty()).then_some(serde_json::Value::Object(styles))
+}
+
+fn strip_css_comments(input: &str) -> String {
+    let mut output = String::new();
+    let mut rest = input;
+    while let Some(start) = rest.find("/*") {
+        output.push_str(&rest[..start]);
+        let after_start = &rest[start + 2..];
+        if let Some(end) = after_start.find("*/") {
+            rest = &after_start[end + 2..];
+        } else {
+            return output;
+        }
+    }
+    output.push_str(rest);
+    output
+}
+
+fn parse_css_declarations(body: &str) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    for declaration in split_css_declarations(body) {
+        let Some((name, value)) = declaration.split_once(':') else {
+            continue;
+        };
+        object.insert(
+            name.trim().to_string(),
+            css_value_to_json(value.trim().trim_end_matches(';').trim()),
+        );
+    }
+    serde_json::Value::Object(object)
+}
+
+fn split_css_declarations(body: &str) -> Vec<String> {
+    let mut declarations = Vec::new();
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut start = 0usize;
+
+    for (index, ch) in body.char_indices() {
+        match ch {
+            '"' | '\'' => {
+                if quote == Some(ch) {
+                    quote = None;
+                } else if quote.is_none() {
+                    quote = Some(ch);
+                }
+            }
+            '(' if quote.is_none() => depth += 1,
+            ')' if quote.is_none() => depth = depth.saturating_sub(1),
+            ';' if quote.is_none() && depth == 0 => {
+                declarations.push(body[start..index].trim().to_string());
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    let tail = body[start..].trim();
+    if !tail.is_empty() {
+        declarations.push(tail.to_string());
+    }
+    declarations
+}
+
+fn css_value_to_json(value: &str) -> serde_json::Value {
+    let unquoted = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| {
+            value
+                .strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+        });
+    if let Some(value) = unquoted {
+        return serde_json::Value::String(value.to_string());
+    }
+    if let Ok(number) = value.parse::<f64>() {
+        return serde_json::json!(number);
+    }
+    serde_json::Value::String(value.to_string())
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -326,6 +666,10 @@ pub struct UiStyle {
     pub border: Option<EdgeSizes>,
     pub border_width: Option<EdgeSizes>,
     pub border_color: Option<String>,
+    pub border_top_color: Option<String>,
+    pub border_right_color: Option<String>,
+    pub border_bottom_color: Option<String>,
+    pub border_left_color: Option<String>,
     pub position: Option<PositionValue>,
     pub left: Option<Length>,
     pub right: Option<Length>,
@@ -350,6 +694,9 @@ pub struct UiStyle {
     pub background: Option<String>,
     pub color: Option<String>,
     pub font_size: Option<f32>,
+    pub font_family: Option<serde_json::Value>,
+    pub font_weight: Option<serde_json::Value>,
+    pub font_style: Option<serde_json::Value>,
     pub opacity: Option<f32>,
     pub outline: Option<OutlineStyle>,
     pub outline_width: Option<Length>,
@@ -364,9 +711,13 @@ pub struct UiStyle {
     pub filter: Option<String>,
     pub backdrop_filter: Option<String>,
     pub display: Option<DisplayValue>,
+    pub placeholder: Option<Box<UiStyle>>,
     pub hover: Option<Box<UiStyle>>,
     pub active: Option<Box<UiStyle>>,
     pub focus: Option<Box<UiStyle>>,
+    pub checked: Option<Box<UiStyle>>,
+    pub focus_within: Option<Box<UiStyle>>,
+    pub focus_visible: Option<Box<UiStyle>>,
     pub disabled: Option<Box<UiStyle>>,
 }
 
@@ -391,6 +742,10 @@ impl UiStyle {
         merge_field!(border);
         merge_field!(border_width);
         merge_field!(border_color);
+        merge_field!(border_top_color);
+        merge_field!(border_right_color);
+        merge_field!(border_bottom_color);
+        merge_field!(border_left_color);
         merge_field!(position);
         merge_field!(left);
         merge_field!(right);
@@ -415,6 +770,9 @@ impl UiStyle {
         merge_field!(background);
         merge_field!(color);
         merge_field!(font_size);
+        merge_field!(font_family);
+        merge_field!(font_weight);
+        merge_field!(font_style);
         merge_field!(opacity);
         merge_field!(outline);
         merge_field!(outline_width);
@@ -429,9 +787,13 @@ impl UiStyle {
         merge_field!(filter);
         merge_field!(backdrop_filter);
         merge_field!(display);
+        merge_field!(placeholder);
         merge_field!(hover);
         merge_field!(active);
         merge_field!(focus);
+        merge_field!(checked);
+        merge_field!(focus_within);
+        merge_field!(focus_visible);
         merge_field!(disabled);
     }
 
@@ -452,7 +814,11 @@ impl UiStyle {
         style.hover = None;
         style.active = None;
         style.focus = None;
+        style.checked = None;
+        style.focus_within = None;
+        style.focus_visible = None;
         style.disabled = None;
+        style.placeholder = None;
         style
     }
 }
@@ -946,6 +1312,13 @@ fn parse_hex_color(hex: &str) -> Option<Color> {
             let b = u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()?;
             Some(Color::rgb_u8(r, g, b))
         }
+        4 => {
+            let r = u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()?;
+            let g = u8::from_str_radix(&hex[1..2].repeat(2), 16).ok()?;
+            let b = u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()?;
+            let a = u8::from_str_radix(&hex[3..4].repeat(2), 16).ok()?;
+            Some(Color::rgba_u8(r, g, b, a))
+        }
         6 => {
             let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
             let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
@@ -972,7 +1345,7 @@ fn parse_rgb_function(value: &str) -> Option<Color> {
     }
 
     let args = args.strip_suffix(')')?;
-    let parts = split_css_args(args);
+    let parts = split_rgb_args(args);
     if parts.len() < 3 || parts.len() > 4 {
         return None;
     }
@@ -991,6 +1364,26 @@ fn parse_rgb_function(value: &str) -> Option<Color> {
         f32::from(b) / 255.0,
         a,
     ))
+}
+
+fn split_rgb_args(value: &str) -> Vec<String> {
+    let comma_parts = split_css_args(value);
+    if comma_parts.len() > 1 {
+        return comma_parts;
+    }
+
+    let mut parts = Vec::new();
+    let mut alpha = None;
+    let mut before_slash = value;
+    if let Some((channels, alpha_value)) = value.split_once('/') {
+        before_slash = channels;
+        alpha = Some(alpha_value.trim().to_string());
+    }
+    parts.extend(before_slash.split_whitespace().map(str::to_string));
+    if let Some(alpha) = alpha {
+        parts.push(alpha);
+    }
+    parts
 }
 
 fn parse_rgb_component(value: &str) -> Option<u8> {

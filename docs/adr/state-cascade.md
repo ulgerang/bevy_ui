@@ -6,6 +6,12 @@ Runtime state styling uses a bounded Bevy-owned state model instead of a full br
 
 The base style is computed from selector rules by specificity and JSON source order. Runtime pseudo-selector rules only participate when the crate has a concrete runtime state source. Nested JSON state blocks such as `hover`, `active`, `focus`, and `disabled` are Bevy-specific overlays attached to the computed style, not selectors.
 
+Supported terminal runtime pseudo-states are `:hover`, `:active`, `:focus`,
+`:focus-visible`, `:focus-within`, `:checked`, and `:disabled`. Matching is
+terminal for direct state overlays and ancestor-state selector chains for
+retained entity context: `button:checked`, `panel:focus-within`,
+`.form:focus-within .field`, and `.tabs:checked > .panel` are supported.
+
 For supported runtime states, the merge order is:
 
 1. Base selector rules by specificity and source order.
@@ -13,7 +19,10 @@ For supported runtime states, the merge order is:
 3. Inline XML attributes as base-layer overrides.
 4. Nested JSON state overlays for the active state.
 
-Within nested overlays, disabled wins over every other state. Focus applies before active/hover overlays so focused decorations can remain visible unless active/hover explicitly override the same field.
+The resolved runtime overlay order is base, `checked`, `focusWithin`,
+`focus`/`focusVisible`, then `active` or `hover`. `disabled` short-circuits and
+overrides all non-disabled overlays. `:focus-visible` follows
+`UiXmlInputModality` so pointer focus can differ from keyboard-visible focus.
 
 ## Drivers
 
@@ -30,17 +39,25 @@ Within nested overlays, disabled wins over every other state. Focus applies befo
 
 ## Why Chosen
 
-This path makes hover, active, and disabled real Bevy runtime states while keeping the implementation bounded. It also preserves JSON-first authoring and leaves room for fuller dynamic selectors later.
+This path makes hover, active, focus, focus-visible, focus-within, checked, and
+disabled real Bevy runtime states while keeping the implementation bounded. It
+also preserves JSON-first authoring and leaves room for fuller dynamic selectors
+later.
 
 ## Consequences
 
 - A mutable disabled component becomes the runtime source of truth after spawn.
 - XML `disabled` seeds the runtime disabled component but does not remain authoritative.
 - `:focus` and nested `focus` are applied when `UiXmlFocus.entity` points at the entity and the entity is not disabled.
-- Runtime selector matching requires retained entity context before pseudo selectors can be recomputed safely.
+- `:checked` follows `UiXmlChecked` after spawn, not the XML `checked`
+  attribute snapshot.
+- `:focus-within` follows `UiXmlFocus.entity` for the focused entity and its
+  retained entity ancestors.
+- Ancestor-state selector-chain overlays are precomputed at spawn from retained
+  selector context and activated from runtime focus/checked state.
 
 ## Follow-Ups
 
-- Add retained runtime selector context before broader dynamic pseudo matching.
+- Broader CSSOM-style invalidation remains deferred.
 - Keep keyboard focus traversal behind a separate ADR.
 - Keep render effects behind a separate ADR and one bounded implementation slice.

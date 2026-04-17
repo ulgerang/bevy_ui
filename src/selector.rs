@@ -29,7 +29,19 @@ struct SimpleSelector {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AttributeSelector {
     name: String,
+    operator: AttributeOperator,
     value: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttributeOperator {
+    Presence,
+    Exact,
+    Includes,
+    DashMatch,
+    Prefix,
+    Suffix,
+    Substring,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,9 +50,27 @@ pub(crate) enum PseudoClass {
     Active,
     Focus,
     Disabled,
+    Checked,
+    FocusWithin,
+    FocusVisible,
 }
 
 impl Selector {
+    pub(crate) fn parse_group(input: &str) -> Vec<Result<Self, String>> {
+        split_selector_group(input)
+            .into_iter()
+            .map(|member| {
+                Self::parse(&member).ok_or_else(|| {
+                    if member.trim().is_empty() {
+                        "empty selector".to_string()
+                    } else {
+                        "unsupported selector syntax".to_string()
+                    }
+                })
+            })
+            .collect()
+    }
+
     pub(crate) fn parse(input: &str) -> Option<Self> {
         let parts = split_selector(input)
             .into_iter()
@@ -69,14 +99,51 @@ impl Selector {
         state: Option<PseudoClass>,
         runtime_state_mode: bool,
     ) -> Option<u32> {
+        self.matches_with_state_scope(path, state, runtime_state_mode, StateMatchScope::Terminal)
+    }
+
+    pub(crate) fn matches_with_ancestor_state(
+        &self,
+        path: &[&ElementNode],
+        state: PseudoClass,
+    ) -> Option<u32> {
+        if !self.has_nonterminal_pseudo(state) {
+            return None;
+        }
+        self.matches_with_state_scope(path, Some(state), true, StateMatchScope::NonTerminal)
+    }
+
+    fn has_nonterminal_pseudo(&self, state: PseudoClass) -> bool {
+        self.parts
+            .iter()
+            .take(self.parts.len().saturating_sub(1))
+            .any(|part| part.simple.pseudo == Some(state))
+    }
+
+    pub(crate) fn has_terminal_pseudo(&self, state: PseudoClass) -> bool {
+        self.parts
+            .last()
+            .is_some_and(|part| part.simple.pseudo == Some(state))
+    }
+
+    fn matches_with_state_scope(
+        &self,
+        path: &[&ElementNode],
+        state: Option<PseudoClass>,
+        runtime_state_mode: bool,
+        state_scope: StateMatchScope,
+    ) -> Option<u32> {
         if path.is_empty() {
             return None;
         }
 
         let mut path_index = path.len() - 1;
+        let terminal_state = (state_scope == StateMatchScope::Terminal)
+            .then_some(state)
+            .flatten();
         let mut bonus = self.parts.last()?.simple.matches_with_state(
             path[path_index],
-            state,
+            terminal_state,
             runtime_state_mode,
         )?;
 
@@ -90,14 +157,24 @@ impl Selector {
                         return None;
                     }
                     path_index -= 1;
-                    bonus += self.parts[part_index].simple.matches(path[path_index])?;
+                    bonus += self.parts[part_index].simple.matches_with_state(
+                        path[path_index],
+                        (state_scope == StateMatchScope::NonTerminal)
+                            .then_some(state)
+                            .flatten(),
+                        runtime_state_mode,
+                    )?;
                 }
                 Combinator::Descendant => {
                     let mut matched = None;
                     for ancestor_index in (0..path_index).rev() {
-                        if let Some(part_bonus) =
-                            self.parts[part_index].simple.matches(path[ancestor_index])
-                        {
+                        if let Some(part_bonus) = self.parts[part_index].simple.matches_with_state(
+                            path[ancestor_index],
+                            (state_scope == StateMatchScope::NonTerminal)
+                                .then_some(state)
+                                .flatten(),
+                            runtime_state_mode,
+                        ) {
                             matched = Some((ancestor_index, part_bonus));
                             break;
                         }
@@ -111,6 +188,12 @@ impl Selector {
 
         Some(bonus)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StateMatchScope {
+    Terminal,
+    NonTerminal,
 }
 
 impl SimpleSelector {
@@ -186,10 +269,6 @@ impl SimpleSelector {
         score
     }
 
-    fn matches(&self, node: &ElementNode) -> Option<u32> {
-        self.matches_with_state(node, None, false)
-    }
-
     fn matches_with_state(
         &self,
         node: &ElementNode,
@@ -222,10 +301,8 @@ impl SimpleSelector {
 
         for attr in &self.attributes {
             let value = node.attr(&attr.name)?;
-            if let Some(expected) = &attr.value {
-                if value != expected {
-                    return None;
-                }
+            if !attr.matches(value) {
+                return None;
             }
         }
 
@@ -246,6 +323,9 @@ impl PseudoClass {
             "active" => Some(Self::Active),
             "focus" => Some(Self::Focus),
             "disabled" => Some(Self::Disabled),
+            "checked" => Some(Self::Checked),
+            "focus-within" => Some(Self::FocusWithin),
+            "focus-visible" => Some(Self::FocusVisible),
             _ => None,
         }
     }
@@ -259,12 +339,78 @@ impl PseudoClass {
         if state == Some(self) {
             return true;
         }
-
         match self {
             Self::Disabled if !runtime_state_mode => node.attr("disabled").is_some(),
-            Self::Disabled | Self::Hover | Self::Active | Self::Focus => false,
+            Self::Checked if !runtime_state_mode => node.attr("checked").is_some(),
+            Self::Disabled
+            | Self::Hover
+            | Self::Active
+            | Self::Focus
+            | Self::Checked
+            | Self::FocusWithin
+            | Self::FocusVisible => false,
         }
     }
+}
+
+impl AttributeSelector {
+    fn matches(&self, value: &str) -> bool {
+        match (self.operator, self.value.as_deref()) {
+            (AttributeOperator::Presence, _) => true,
+            (_, None) => true,
+            (AttributeOperator::Exact, Some(expected)) => value == expected,
+            (AttributeOperator::Includes, Some(expected)) => {
+                !expected.is_empty() && value.split_whitespace().any(|token| token == expected)
+            }
+            (AttributeOperator::DashMatch, Some(expected)) => {
+                value == expected
+                    || value
+                        .strip_prefix(expected)
+                        .is_some_and(|rest| rest.starts_with('-'))
+            }
+            (AttributeOperator::Prefix, Some(expected)) => value.starts_with(expected),
+            (AttributeOperator::Suffix, Some(expected)) => value.ends_with(expected),
+            (AttributeOperator::Substring, Some(expected)) => {
+                !expected.is_empty() && value.contains(expected)
+            }
+        }
+    }
+}
+
+fn split_selector_group(input: &str) -> Vec<String> {
+    let mut members = Vec::new();
+    let mut current = String::new();
+    let mut bracket_depth = 0usize;
+    let mut quote = None;
+
+    for ch in input.chars() {
+        match ch {
+            '"' | '\'' if bracket_depth > 0 => {
+                if quote == Some(ch) {
+                    quote = None;
+                } else if quote.is_none() {
+                    quote = Some(ch);
+                }
+                current.push(ch);
+            }
+            '[' if quote.is_none() => {
+                bracket_depth += 1;
+                current.push(ch);
+            }
+            ']' if quote.is_none() => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ',' if bracket_depth == 0 && quote.is_none() => {
+                members.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    members.push(current.trim().to_string());
+    members
 }
 
 fn split_selector(input: &str) -> Vec<(Option<Combinator>, String)> {
@@ -346,26 +492,56 @@ fn parse_attribute_selector(chars: &[char], start: usize) -> Option<(AttributeSe
         return None;
     }
 
-    let (name, value) = if let Some((name, value)) = raw.split_once('=') {
-        (
-            name.trim().to_string(),
-            Some(
-                value
-                    .trim()
-                    .trim_matches('"')
-                    .trim_matches('\'')
-                    .to_string(),
-            ),
-        )
-    } else {
-        (raw.trim().to_string(), None)
-    };
+    let (name, operator, value) = parse_attribute_body(&raw);
 
     if name.is_empty() {
         return None;
     }
 
-    Some((AttributeSelector { name, value }, index + 1))
+    Some((
+        AttributeSelector {
+            name,
+            operator,
+            value,
+        },
+        index + 1,
+    ))
+}
+
+fn parse_attribute_body(raw: &str) -> (String, AttributeOperator, Option<String>) {
+    for (token, operator) in [
+        ("~=", AttributeOperator::Includes),
+        ("|=", AttributeOperator::DashMatch),
+        ("^=", AttributeOperator::Prefix),
+        ("$=", AttributeOperator::Suffix),
+        ("*=", AttributeOperator::Substring),
+        ("=", AttributeOperator::Exact),
+    ] {
+        if let Some((name, value)) = raw.split_once(token) {
+            return (
+                name.trim().to_string(),
+                operator,
+                Some(unquote_attribute_value(value.trim())),
+            );
+        }
+    }
+
+    (raw.trim().to_string(), AttributeOperator::Presence, None)
+}
+
+fn unquote_attribute_value(value: &str) -> String {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let Some(last) = value.chars().last() else {
+        return String::new();
+    };
+    if (first == '"' || first == '\'') && last == first && value.len() >= 2 {
+        value[1..value.len() - first.len_utf8()].to_string()
+    } else {
+        value.to_string()
+    }
 }
 
 fn is_ident_start(ch: char) -> bool {

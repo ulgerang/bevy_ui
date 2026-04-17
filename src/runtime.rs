@@ -1,10 +1,13 @@
-use crate::render_effects::outline_from_style;
+use crate::render_effects::{
+    border_colors_from_style, outline_from_style, render_material_spec_from_style,
+    unsupported_effects_from_style, UiXmlRenderMaterialSpec,
+};
 use crate::style::{style_color, to_bevy_style, UiStyle};
-use crate::ElementNode;
+use crate::{ElementNode, UiXmlEffectMaterial};
 use bevy::input::keyboard::{KeyCode, KeyboardInput};
 use bevy::input::ButtonState;
 use bevy::prelude::*;
-use bevy::window::ReceivedCharacter;
+use bevy::window::{Ime, ReceivedCharacter};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
@@ -43,6 +46,66 @@ pub struct UiXmlDocumentOrder(pub usize);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct UiXmlForm;
 
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UiXmlRequired(pub bool);
+
+#[derive(Component, Debug, Clone, PartialEq, Eq, Default)]
+pub struct UiXmlValidationState {
+    pub valid: bool,
+    pub reason: Option<String>,
+}
+
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UiXmlInitialChecked(pub bool);
+
+#[derive(Component, Debug, Clone, PartialEq, Eq, Default)]
+pub struct UiXmlInitialTextValue(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UiXmlFormValue {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Event, Debug, Clone, PartialEq, Eq)]
+pub struct UiXmlFormSubmitRequested {
+    pub form: Entity,
+}
+
+#[derive(Event, Debug, Clone, PartialEq, Eq)]
+pub struct UiXmlFormResetRequested {
+    pub form: Entity,
+}
+
+#[derive(Event, Debug, Clone, PartialEq, Eq)]
+pub struct UiXmlFormSubmitted {
+    pub form: Entity,
+    pub values: Vec<UiXmlFormValue>,
+}
+
+#[derive(Event, Debug, Clone, PartialEq, Eq)]
+pub struct UiXmlFormValidationFailed {
+    pub form: Entity,
+    pub entity: Entity,
+    pub name: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Event, Debug, Clone, PartialEq, Eq)]
+pub struct UiXmlValidationStateChanged {
+    pub entity: Entity,
+    pub valid: bool,
+    pub reason: Option<String>,
+}
+
+#[derive(Event, Debug, Clone, PartialEq, Eq)]
+pub struct UiXmlNavigationRequested {
+    pub form: Entity,
+    pub action: Option<String>,
+    pub method: Option<String>,
+    pub values: Vec<UiXmlFormValue>,
+}
+
 #[derive(Event, Debug, Clone, PartialEq, Eq)]
 pub struct UiXmlControlChanged {
     pub entity: Entity,
@@ -60,8 +123,34 @@ pub struct UiXmlTextInput;
 #[derive(Component, Debug, Clone, PartialEq, Eq, Default)]
 pub struct UiXmlTextValue(pub String);
 
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UiXmlTextCursor {
+    pub position: usize,
+}
+
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UiXmlTextSelection {
+    pub anchor: usize,
+    pub focus: usize,
+}
+
+#[derive(Component, Debug, Clone, PartialEq, Eq, Default)]
+pub struct UiXmlImePreedit {
+    pub value: String,
+    pub cursor: Option<(usize, usize)>,
+}
+
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UiXmlTextDisplay(pub Entity);
+
+#[derive(Component, Debug, Clone, PartialEq)]
+pub struct UiXmlTextPlaceholder {
+    pub text: String,
+    pub placeholder_color: Option<Color>,
+    pub placeholder_font_size: Option<f32>,
+    pub value_color: Color,
+    pub value_font_size: f32,
+}
 
 #[derive(Event, Debug, Clone, PartialEq, Eq)]
 pub struct UiXmlTextChanged {
@@ -72,9 +161,47 @@ pub struct UiXmlTextChanged {
     pub value: String,
 }
 
+#[derive(Event, Debug, Clone, PartialEq, Eq)]
+pub struct UiXmlClipboardCopyRequested {
+    pub entity: Entity,
+}
+
+#[derive(Event, Debug, Clone, PartialEq, Eq)]
+pub struct UiXmlClipboardCutRequested {
+    pub entity: Entity,
+}
+
+#[derive(Event, Debug, Clone, PartialEq, Eq)]
+pub struct UiXmlClipboardPasteRequested {
+    pub entity: Entity,
+}
+
+#[derive(Event, Debug, Clone, PartialEq, Eq)]
+pub struct UiXmlTextSelectAllRequested {
+    pub entity: Entity,
+}
+
+#[derive(Resource, Debug, Clone, PartialEq, Eq, Default)]
+pub struct UiXmlClipboard {
+    pub text: String,
+}
+
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct UiXmlFocus {
     pub entity: Option<Entity>,
+}
+
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UiXmlInputModality {
+    pub focus_visible: bool,
+}
+
+impl Default for UiXmlInputModality {
+    fn default() -> Self {
+        Self {
+            focus_visible: true,
+        }
+    }
 }
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -83,6 +210,11 @@ pub struct UiXmlRuntimeState {
     pub active: bool,
     pub disabled: bool,
     pub focused: bool,
+    pub focus_visible: bool,
+    pub checked: bool,
+    pub focus_within: bool,
+    pub ancestor_checked: bool,
+    pub ancestor_focus_within: bool,
     pub style_generation: u64,
 }
 
@@ -92,34 +224,70 @@ pub struct UiXmlStyleSource {
     pub hover: UiStyle,
     pub active: UiStyle,
     pub focus: UiStyle,
+    pub checked: UiStyle,
+    pub focus_within: UiStyle,
+    pub focus_visible: UiStyle,
+    pub ancestor_checked: UiStyle,
+    pub ancestor_focus_within: UiStyle,
     pub disabled: UiStyle,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct RuntimeStyleInputs<'a> {
+    pub(crate) base: &'a UiStyle,
+    pub(crate) hover: &'a UiStyle,
+    pub(crate) active: &'a UiStyle,
+    pub(crate) focus: &'a UiStyle,
+    pub(crate) checked: &'a UiStyle,
+    pub(crate) focus_within: &'a UiStyle,
+    pub(crate) focus_visible: &'a UiStyle,
+    pub(crate) ancestor_checked: &'a UiStyle,
+    pub(crate) ancestor_focus_within: &'a UiStyle,
+    pub(crate) disabled: &'a UiStyle,
+}
+
 impl UiXmlStyleSource {
-    pub(crate) fn from_runtime_styles(
-        base: &UiStyle,
-        hover: &UiStyle,
-        active: &UiStyle,
-        focus: &UiStyle,
-        disabled: &UiStyle,
-    ) -> Self {
+    pub(crate) fn from_runtime_styles(styles: RuntimeStyleInputs<'_>) -> Self {
         Self {
-            base: base.without_state_styles(),
-            hover: state_overlay(hover, base.hover.as_deref()),
-            active: state_overlay(active, base.active.as_deref()),
-            focus: state_overlay(focus, base.focus.as_deref()),
-            disabled: state_overlay(disabled, base.disabled.as_deref()),
+            base: styles.base.without_state_styles(),
+            hover: state_overlay(styles.hover, styles.base.hover.as_deref()),
+            active: state_overlay(styles.active, styles.base.active.as_deref()),
+            focus: state_overlay(styles.focus, styles.base.focus.as_deref()),
+            checked: state_overlay(styles.checked, styles.base.checked.as_deref()),
+            focus_within: state_overlay(styles.focus_within, styles.base.focus_within.as_deref()),
+            focus_visible: state_overlay(
+                styles.focus_visible,
+                styles.base.focus_visible.as_deref(),
+            ),
+            ancestor_checked: styles.ancestor_checked.without_state_styles(),
+            ancestor_focus_within: styles.ancestor_focus_within.without_state_styles(),
+            disabled: state_overlay(styles.disabled, styles.base.disabled.as_deref()),
         }
     }
 
-    fn resolve(&self, runtime_state: UiXmlRuntimeState) -> UiStyle {
+    pub(crate) fn resolve(&self, runtime_state: UiXmlRuntimeState) -> UiStyle {
         let mut style = self.base.clone();
         if runtime_state.disabled {
             style.merge(&self.disabled);
             return style;
         }
+        if runtime_state.checked {
+            style.merge(&self.checked);
+        }
+        if runtime_state.ancestor_checked {
+            style.merge(&self.ancestor_checked);
+        }
+        if runtime_state.focus_within {
+            style.merge(&self.focus_within);
+        }
+        if runtime_state.ancestor_focus_within {
+            style.merge(&self.ancestor_focus_within);
+        }
         if runtime_state.focused {
             style.merge(&self.focus);
+        }
+        if runtime_state.focus_visible {
+            style.merge(&self.focus_visible);
         }
         if runtime_state.active {
             style.merge(&self.active);
@@ -226,6 +394,11 @@ pub struct UiXmlStateStyles {
     active: Option<UiStyle>,
     disabled: Option<UiStyle>,
     focus: Option<UiStyle>,
+    checked: Option<UiStyle>,
+    focus_within: Option<UiStyle>,
+    focus_visible: Option<UiStyle>,
+    ancestor_checked: Option<UiStyle>,
+    ancestor_focus_within: Option<UiStyle>,
 }
 
 #[allow(dead_code)]
@@ -238,22 +411,44 @@ impl UiXmlStateStyles {
             active: style.active.as_deref().map(UiStyle::without_state_styles),
             disabled: style.disabled.as_deref().map(UiStyle::without_state_styles),
             focus: style.focus.as_deref().map(UiStyle::without_state_styles),
+            checked: style.checked.as_deref().map(UiStyle::without_state_styles),
+            focus_within: style
+                .focus_within
+                .as_deref()
+                .map(UiStyle::without_state_styles),
+            focus_visible: style
+                .focus_visible
+                .as_deref()
+                .map(UiStyle::without_state_styles),
+            ancestor_checked: None,
+            ancestor_focus_within: None,
         }
     }
 
-    pub(crate) fn from_runtime_styles(
-        base: &UiStyle,
-        hover: &UiStyle,
-        active: &UiStyle,
-        focus: &UiStyle,
-        disabled: &UiStyle,
-    ) -> Self {
+    pub(crate) fn from_runtime_styles(styles: RuntimeStyleInputs<'_>) -> Self {
         Self {
-            base: base.without_state_styles(),
-            hover: Some(state_overlay(hover, base.hover.as_deref())),
-            active: Some(state_overlay(active, base.active.as_deref())),
-            focus: Some(state_overlay(focus, base.focus.as_deref())),
-            disabled: Some(state_overlay(disabled, base.disabled.as_deref())),
+            base: styles.base.without_state_styles(),
+            hover: Some(state_overlay(styles.hover, styles.base.hover.as_deref())),
+            active: Some(state_overlay(styles.active, styles.base.active.as_deref())),
+            focus: Some(state_overlay(styles.focus, styles.base.focus.as_deref())),
+            checked: Some(state_overlay(
+                styles.checked,
+                styles.base.checked.as_deref(),
+            )),
+            focus_within: Some(state_overlay(
+                styles.focus_within,
+                styles.base.focus_within.as_deref(),
+            )),
+            focus_visible: Some(state_overlay(
+                styles.focus_visible,
+                styles.base.focus_visible.as_deref(),
+            )),
+            ancestor_checked: Some(styles.ancestor_checked.without_state_styles()),
+            ancestor_focus_within: Some(styles.ancestor_focus_within.without_state_styles()),
+            disabled: Some(state_overlay(
+                styles.disabled,
+                styles.base.disabled.as_deref(),
+            )),
         }
     }
 
@@ -264,6 +459,18 @@ impl UiXmlStateStyles {
                 style.merge(disabled);
             }
             return style;
+        }
+        if let Some(checked) = &self.checked {
+            style.merge(checked);
+        }
+        if let Some(ancestor_checked) = &self.ancestor_checked {
+            style.merge(ancestor_checked);
+        }
+        if let Some(focus_within) = &self.focus_within {
+            style.merge(focus_within);
+        }
+        if let Some(ancestor_focus_within) = &self.ancestor_focus_within {
+            style.merge(ancestor_focus_within);
         }
 
         match interaction {
@@ -289,10 +496,23 @@ impl Plugin for UiXmlPlugin {
     fn build(&self, app: &mut App) {
         app.add_event::<UiXmlControlChanged>()
             .add_event::<UiXmlTextChanged>()
+            .add_event::<UiXmlFormSubmitRequested>()
+            .add_event::<UiXmlFormResetRequested>()
+            .add_event::<UiXmlFormSubmitted>()
+            .add_event::<UiXmlFormValidationFailed>()
+            .add_event::<UiXmlValidationStateChanged>()
+            .add_event::<UiXmlNavigationRequested>()
+            .add_event::<UiXmlClipboardCopyRequested>()
+            .add_event::<UiXmlClipboardCutRequested>()
+            .add_event::<UiXmlClipboardPasteRequested>()
+            .add_event::<UiXmlTextSelectAllRequested>()
             .add_event::<ReceivedCharacter>()
             .add_event::<KeyboardInput>()
+            .add_event::<Ime>()
+            .init_resource::<UiXmlClipboard>()
             .init_resource::<UiXmlStyleRuntime>()
             .init_resource::<UiXmlFocus>()
+            .init_resource::<UiXmlInputModality>()
             .init_resource::<UiXmlSelectorContextCache>()
             .add_systems(
                 Update,
@@ -302,10 +522,16 @@ impl Plugin for UiXmlPlugin {
                     normalize_initial_radio_groups,
                     focus_pressed_text_inputs,
                     apply_control_interactions,
+                    apply_text_selection_requests,
+                    apply_clipboard_requests,
                     apply_text_input,
+                    apply_ime_input,
+                    apply_form_reset_requests,
+                    apply_form_submit_requests,
                     sync_text_display,
                     sync_runtime_state,
                     apply_interaction_styles,
+                    apply_effect_materials,
                 )
                     .chain(),
             );
@@ -519,6 +745,109 @@ fn control_value(value: Option<&UiXmlControlValue>) -> String {
         .unwrap_or_else(|| "on".to_string())
 }
 
+type TextEditDirectQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static UiXmlDisabled,
+        &'static mut UiXmlTextValue,
+        &'static mut UiXmlTextCursor,
+        &'static mut UiXmlTextSelection,
+        Option<&'static UiXmlControlScope>,
+        Option<&'static UiXmlControlName>,
+    ),
+    With<UiXmlTextInput>,
+>;
+
+fn apply_text_selection_requests(
+    mut requests: EventReader<UiXmlTextSelectAllRequested>,
+    mut query: Query<(
+        &UiXmlTextValue,
+        &mut UiXmlTextCursor,
+        &mut UiXmlTextSelection,
+    )>,
+) {
+    for request in requests.read() {
+        let Ok((value, mut cursor, mut selection)) = query.get_mut(request.entity) else {
+            continue;
+        };
+        selection.anchor = 0;
+        selection.focus = value.0.chars().count();
+        cursor.position = selection.focus;
+    }
+}
+
+fn apply_clipboard_requests(
+    mut copy_requests: EventReader<UiXmlClipboardCopyRequested>,
+    mut cut_requests: EventReader<UiXmlClipboardCutRequested>,
+    mut paste_requests: EventReader<UiXmlClipboardPasteRequested>,
+    mut clipboard: ResMut<UiXmlClipboard>,
+    mut events: EventWriter<UiXmlTextChanged>,
+    mut query: TextEditDirectQuery<'_, '_>,
+) {
+    for request in copy_requests.read() {
+        if let Ok((_, value, _, selection, _, _)) = query.get_mut(request.entity) {
+            clipboard.text = selected_text(&value.0, *selection);
+        }
+    }
+    for request in cut_requests.read() {
+        let Ok((disabled, mut value, mut cursor, mut selection, scope, name)) =
+            query.get_mut(request.entity)
+        else {
+            continue;
+        };
+        if disabled.0 {
+            continue;
+        }
+        clipboard.text = selected_text(&value.0, *selection);
+        if clipboard.text.is_empty() {
+            continue;
+        }
+        let previous_value = value.0.clone();
+        delete_selection(&mut value.0, &mut cursor, &mut selection);
+        send_text_changed(
+            &mut events,
+            request.entity,
+            scope,
+            name,
+            previous_value,
+            value.0.clone(),
+        );
+    }
+    for request in paste_requests.read() {
+        let Ok((disabled, mut value, mut cursor, mut selection, scope, name)) =
+            query.get_mut(request.entity)
+        else {
+            continue;
+        };
+        if disabled.0 || clipboard.text.is_empty() {
+            continue;
+        }
+        let previous_value = value.0.clone();
+        replace_selection_or_insert(&mut value.0, &mut cursor, &mut selection, &clipboard.text);
+        send_text_changed(
+            &mut events,
+            request.entity,
+            scope,
+            name,
+            previous_value,
+            value.0.clone(),
+        );
+    }
+}
+
+fn selected_text(value: &str, selection: UiXmlTextSelection) -> String {
+    let (start, end) = selection_bounds(selection);
+    if start == end {
+        return String::new();
+    }
+    value
+        .chars()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .collect()
+}
+
 type TextFocusInteractionQuery<'w, 's> = Query<
     'w,
     's,
@@ -528,11 +857,13 @@ type TextFocusInteractionQuery<'w, 's> = Query<
 
 fn focus_pressed_text_inputs(
     mut focus: ResMut<UiXmlFocus>,
+    mut modality: ResMut<UiXmlInputModality>,
     query: TextFocusInteractionQuery<'_, '_>,
 ) {
     for (entity, interaction, disabled) in &query {
         if *interaction == Interaction::Pressed && !disabled.0 {
             focus.entity = Some(entity);
+            modality.focus_visible = false;
         }
     }
 }
@@ -543,6 +874,8 @@ type TextInputMutationQuery<'w, 's> = Query<
     (
         &'static UiXmlDisabled,
         &'static mut UiXmlTextValue,
+        &'static mut UiXmlTextCursor,
+        &'static mut UiXmlTextSelection,
         Option<&'static UiXmlControlScope>,
         Option<&'static UiXmlControlName>,
     ),
@@ -551,6 +884,7 @@ type TextInputMutationQuery<'w, 's> = Query<
 
 fn apply_text_input(
     focus: Res<UiXmlFocus>,
+    mut modality: ResMut<UiXmlInputModality>,
     mut received_characters: EventReader<ReceivedCharacter>,
     mut keyboard_inputs: EventReader<KeyboardInput>,
     mut events: EventWriter<UiXmlTextChanged>,
@@ -562,7 +896,8 @@ fn apply_text_input(
         return;
     };
 
-    let Ok((disabled, mut value, scope, name)) = query.get_mut(entity) else {
+    let Ok((disabled, mut value, mut cursor, mut selection, scope, name)) = query.get_mut(entity)
+    else {
         received_characters.clear();
         keyboard_inputs.clear();
         return;
@@ -578,8 +913,14 @@ fn apply_text_input(
         if received.char.is_control() {
             continue;
         }
+        modality.focus_visible = true;
         let previous_value = value.0.clone();
-        value.0.push(received.char);
+        replace_selection_or_insert(
+            &mut value.0,
+            &mut cursor,
+            &mut selection,
+            &received.char.to_string(),
+        );
         send_text_changed(
             &mut events,
             entity,
@@ -594,23 +935,213 @@ fn apply_text_input(
         if input.state != ButtonState::Pressed {
             continue;
         }
-        if input.key_code != Some(KeyCode::Back) {
-            continue;
+        modality.focus_visible = true;
+        match input.key_code {
+            Some(KeyCode::Back) => {
+                let previous_value = value.0.clone();
+                if delete_selection(&mut value.0, &mut cursor, &mut selection) {
+                    send_text_changed(
+                        &mut events,
+                        entity,
+                        scope,
+                        name,
+                        previous_value,
+                        value.0.clone(),
+                    );
+                    continue;
+                }
+                if cursor.position == 0 || value.0.is_empty() {
+                    continue;
+                }
+                let start = char_to_byte_index(&value.0, cursor.position - 1);
+                let end = char_to_byte_index(&value.0, cursor.position);
+                value.0.replace_range(start..end, "");
+                cursor.position -= 1;
+                selection.anchor = cursor.position;
+                selection.focus = cursor.position;
+                send_text_changed(
+                    &mut events,
+                    entity,
+                    scope,
+                    name,
+                    previous_value,
+                    value.0.clone(),
+                );
+            }
+            Some(KeyCode::Delete) => {
+                let previous_value = value.0.clone();
+                if delete_selection(&mut value.0, &mut cursor, &mut selection) {
+                    send_text_changed(
+                        &mut events,
+                        entity,
+                        scope,
+                        name,
+                        previous_value,
+                        value.0.clone(),
+                    );
+                    continue;
+                }
+                if cursor.position >= value.0.chars().count() {
+                    continue;
+                }
+                let start = char_to_byte_index(&value.0, cursor.position);
+                let end = char_to_byte_index(&value.0, cursor.position + 1);
+                value.0.replace_range(start..end, "");
+                selection.anchor = cursor.position;
+                selection.focus = cursor.position;
+                send_text_changed(
+                    &mut events,
+                    entity,
+                    scope,
+                    name,
+                    previous_value,
+                    value.0.clone(),
+                );
+            }
+            Some(KeyCode::Left) => {
+                cursor.position = cursor.position.saturating_sub(1);
+                selection.anchor = cursor.position;
+                selection.focus = cursor.position;
+            }
+            Some(KeyCode::Right) => {
+                cursor.position = (cursor.position + 1).min(value.0.chars().count());
+                selection.anchor = cursor.position;
+                selection.focus = cursor.position;
+            }
+            Some(KeyCode::Home) => {
+                cursor.position = 0;
+                selection.anchor = 0;
+                selection.focus = 0;
+            }
+            Some(KeyCode::End) => {
+                cursor.position = value.0.chars().count();
+                selection.anchor = cursor.position;
+                selection.focus = cursor.position;
+            }
+            _ => {}
         }
-        if value.0.is_empty() {
-            continue;
-        }
-        let previous_value = value.0.clone();
-        value.0.pop();
-        send_text_changed(
-            &mut events,
-            entity,
-            scope,
-            name,
-            previous_value,
-            value.0.clone(),
-        );
     }
+}
+
+fn replace_selection_or_insert(
+    value: &mut String,
+    cursor: &mut UiXmlTextCursor,
+    selection: &mut UiXmlTextSelection,
+    text: &str,
+) {
+    let (start, end) = selection_bounds(*selection);
+    if start != end {
+        let byte_start = char_to_byte_index(value, start);
+        let byte_end = char_to_byte_index(value, end);
+        value.replace_range(byte_start..byte_end, text);
+        cursor.position = start + text.chars().count();
+    } else {
+        let byte_index = char_to_byte_index(value, cursor.position);
+        value.insert_str(byte_index, text);
+        cursor.position += text.chars().count();
+    }
+    selection.anchor = cursor.position;
+    selection.focus = cursor.position;
+}
+
+fn delete_selection(
+    value: &mut String,
+    cursor: &mut UiXmlTextCursor,
+    selection: &mut UiXmlTextSelection,
+) -> bool {
+    let (start, end) = selection_bounds(*selection);
+    if start == end {
+        return false;
+    }
+    let byte_start = char_to_byte_index(value, start);
+    let byte_end = char_to_byte_index(value, end);
+    value.replace_range(byte_start..byte_end, "");
+    cursor.position = start;
+    selection.anchor = start;
+    selection.focus = start;
+    true
+}
+
+fn selection_bounds(selection: UiXmlTextSelection) -> (usize, usize) {
+    (
+        selection.anchor.min(selection.focus),
+        selection.anchor.max(selection.focus),
+    )
+}
+
+type ImeTextQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static UiXmlDisabled,
+        &'static mut UiXmlTextValue,
+        &'static mut UiXmlTextCursor,
+        &'static mut UiXmlTextSelection,
+        &'static mut UiXmlImePreedit,
+        Option<&'static UiXmlControlScope>,
+        Option<&'static UiXmlControlName>,
+    ),
+    With<UiXmlTextInput>,
+>;
+
+fn apply_ime_input(
+    focus: Res<UiXmlFocus>,
+    mut modality: ResMut<UiXmlInputModality>,
+    mut ime_events: EventReader<Ime>,
+    mut text_events: EventWriter<UiXmlTextChanged>,
+    mut query: ImeTextQuery<'_, '_>,
+) {
+    let Some(entity) = focus.entity else {
+        ime_events.clear();
+        return;
+    };
+    let Ok((disabled, mut value, mut cursor, mut selection, mut preedit, scope, name)) =
+        query.get_mut(entity)
+    else {
+        ime_events.clear();
+        return;
+    };
+    if disabled.0 {
+        ime_events.clear();
+        return;
+    }
+
+    for event in ime_events.read() {
+        modality.focus_visible = true;
+        match event {
+            Ime::Preedit { value, cursor, .. } => {
+                preedit.value = value.clone();
+                preedit.cursor = *cursor;
+            }
+            Ime::Commit { value: text, .. } => {
+                let previous_value = value.0.clone();
+                replace_selection_or_insert(&mut value.0, &mut cursor, &mut selection, text);
+                preedit.value.clear();
+                preedit.cursor = None;
+                send_text_changed(
+                    &mut text_events,
+                    entity,
+                    scope,
+                    name,
+                    previous_value,
+                    value.0.clone(),
+                );
+            }
+            Ime::Enabled { .. } => {}
+            Ime::Disabled { .. } => {
+                preedit.value.clear();
+                preedit.cursor = None;
+            }
+        }
+    }
+}
+
+fn char_to_byte_index(value: &str, char_index: usize) -> usize {
+    value
+        .char_indices()
+        .nth(char_index)
+        .map(|(index, _)| index)
+        .unwrap_or(value.len())
 }
 
 fn send_text_changed(
@@ -630,17 +1161,220 @@ fn send_text_changed(
     });
 }
 
-type TextDisplaySyncQuery<'w, 's> =
-    Query<'w, 's, (&'static UiXmlTextValue, &'static UiXmlTextDisplay), Changed<UiXmlTextValue>>;
+type FormTextQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static UiXmlControlScope,
+        Option<&'static UiXmlControlName>,
+        &'static UiXmlTextValue,
+        Option<&'static UiXmlRequired>,
+        Option<&'static mut UiXmlValidationState>,
+    ),
+    With<UiXmlTextInput>,
+>;
 
-fn sync_text_display(value_query: TextDisplaySyncQuery<'_, '_>, mut text_query: Query<&mut Text>) {
-    for (value, display) in &value_query {
+type FormControlQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static UiXmlControlScope,
+        Option<&'static UiXmlControlName>,
+        Option<&'static UiXmlControlValue>,
+        &'static UiXmlControlKind,
+        &'static UiXmlChecked,
+    ),
+>;
+
+type FormTextResetQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static UiXmlControlScope,
+        &'static UiXmlInitialTextValue,
+        &'static mut UiXmlTextValue,
+        Option<&'static mut UiXmlTextCursor>,
+        Option<&'static mut UiXmlTextSelection>,
+    ),
+    With<UiXmlTextInput>,
+>;
+
+type FormControlResetQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static UiXmlControlScope,
+        &'static UiXmlInitialChecked,
+        &'static mut UiXmlChecked,
+    ),
+    With<UiXmlControlKind>,
+>;
+
+fn apply_form_reset_requests(
+    mut requests: EventReader<UiXmlFormResetRequested>,
+    mut text_query: FormTextResetQuery<'_, '_>,
+    mut control_query: FormControlResetQuery<'_, '_>,
+) {
+    for request in requests.read() {
+        for (scope, initial, mut value, cursor, selection) in &mut text_query {
+            if scope.0 != request.form {
+                continue;
+            }
+            value.0 = initial.0.clone();
+            if let Some(mut cursor) = cursor {
+                cursor.position = value.0.chars().count();
+            }
+            if let Some(mut selection) = selection {
+                selection.anchor = value.0.chars().count();
+                selection.focus = selection.anchor;
+            }
+        }
+        for (scope, initial, mut checked) in &mut control_query {
+            if scope.0 == request.form {
+                checked.0 = initial.0;
+            }
+        }
+    }
+}
+
+fn apply_form_submit_requests(
+    mut requests: EventReader<UiXmlFormSubmitRequested>,
+    mut text_query: FormTextQuery<'_, '_>,
+    control_query: FormControlQuery<'_, '_>,
+    mut submitted: EventWriter<UiXmlFormSubmitted>,
+    mut validation_failed: EventWriter<UiXmlFormValidationFailed>,
+    mut validation_changed: EventWriter<UiXmlValidationStateChanged>,
+    mut navigation: EventWriter<UiXmlNavigationRequested>,
+) {
+    for request in requests.read() {
+        let mut values = Vec::new();
+        let mut valid = true;
+
+        for (entity, scope, name, value, required, validation_state) in &mut text_query {
+            if scope.0 != request.form {
+                continue;
+            }
+            let name_value = name
+                .map(|name| name.0.trim())
+                .filter(|name| !name.is_empty());
+            if required.is_some_and(|required| required.0) && value.0.trim().is_empty() {
+                valid = false;
+                if let Some(mut validation_state) = validation_state {
+                    validation_state.valid = false;
+                    validation_state.reason = Some("required".to_string());
+                }
+                validation_changed.send(UiXmlValidationStateChanged {
+                    entity,
+                    valid: false,
+                    reason: Some("required".to_string()),
+                });
+                validation_failed.send(UiXmlFormValidationFailed {
+                    form: request.form,
+                    entity,
+                    name: name_value.map(str::to_string),
+                    reason: "required".to_string(),
+                });
+            } else if let Some(mut validation_state) = validation_state {
+                validation_state.valid = true;
+                validation_state.reason = None;
+                validation_changed.send(UiXmlValidationStateChanged {
+                    entity,
+                    valid: true,
+                    reason: None,
+                });
+            }
+            if let Some(name) = name_value {
+                values.push(UiXmlFormValue {
+                    name: name.to_string(),
+                    value: value.0.clone(),
+                });
+            }
+        }
+
+        for (scope, name, value, kind, checked) in &control_query {
+            if scope.0 != request.form || !checked.0 {
+                continue;
+            }
+            let Some(name) = normalized_name(name) else {
+                continue;
+            };
+            let value = match kind {
+                UiXmlControlKind::Checkbox | UiXmlControlKind::Radio => control_value(value),
+            };
+            values.push(UiXmlFormValue {
+                name: name.to_string(),
+                value,
+            });
+        }
+
+        if valid {
+            navigation.send(UiXmlNavigationRequested {
+                form: request.form,
+                action: None,
+                method: None,
+                values: values.clone(),
+            });
+            submitted.send(UiXmlFormSubmitted {
+                form: request.form,
+                values,
+            });
+        }
+    }
+}
+
+type TextDisplaySyncQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static UiXmlTextValue,
+        &'static UiXmlTextDisplay,
+        Option<&'static UiXmlTextPlaceholder>,
+        Option<&'static mut UiXmlTextCursor>,
+    ),
+    Changed<UiXmlTextValue>,
+>;
+
+fn sync_text_display(
+    mut value_query: TextDisplaySyncQuery<'_, '_>,
+    mut text_query: Query<&mut Text>,
+) {
+    for (value, display, placeholder, cursor) in &mut value_query {
+        if let Some(mut cursor) = cursor {
+            cursor.position = cursor.position.min(value.0.chars().count());
+        }
         let Ok(mut text) = text_query.get_mut(display.0) else {
             continue;
         };
         if let Some(section) = text.sections.first_mut() {
-            section.value = value.0.clone();
+            apply_text_presentation(section, value, placeholder);
         }
+    }
+}
+
+pub(crate) fn apply_text_presentation(
+    section: &mut TextSection,
+    value: &UiXmlTextValue,
+    placeholder: Option<&UiXmlTextPlaceholder>,
+) {
+    let show_placeholder = value.0.is_empty();
+    if show_placeholder {
+        if let Some(placeholder) = placeholder {
+            section.value = placeholder.text.clone();
+            section.style.color = placeholder
+                .placeholder_color
+                .unwrap_or(placeholder.value_color);
+            section.style.font_size = placeholder
+                .placeholder_font_size
+                .unwrap_or(placeholder.value_font_size);
+            return;
+        }
+    }
+
+    section.value = value.0.clone();
+    if let Some(placeholder) = placeholder {
+        section.style.color = placeholder.value_color;
+        section.style.font_size = placeholder.value_font_size;
     }
 }
 
@@ -681,14 +1415,33 @@ type RuntimeStateQuery<'w, 's> = Query<
         Entity,
         Option<&'static Interaction>,
         &'static UiXmlDisabled,
+        Option<&'static UiXmlChecked>,
         &'static mut UiXmlRuntimeState,
     ),
 >;
 
-fn sync_runtime_state(focus: Res<UiXmlFocus>, mut query: RuntimeStateQuery<'_, '_>) {
-    for (entity, interaction, disabled, mut state) in &mut query {
+fn sync_runtime_state(
+    focus: Res<UiXmlFocus>,
+    modality: Res<UiXmlInputModality>,
+    cache: Res<UiXmlSelectorContextCache>,
+    checked_lookup: Query<&UiXmlChecked>,
+    mut query: RuntimeStateQuery<'_, '_>,
+) {
+    for (entity, interaction, disabled, checked, mut state) in &mut query {
         let next_disabled = disabled.0;
         let next_focused = focus.entity == Some(entity) && !next_disabled;
+        let next_focus_visible = next_focused && modality.focus_visible;
+        let next_checked = checked.is_some_and(|checked| checked.0) && !next_disabled;
+        let next_focus_within = focus
+            .entity
+            .is_some_and(|focused| entity_contains_focus(entity, focused, &cache))
+            && !next_disabled;
+        let next_ancestor_focus_within = focus
+            .entity
+            .is_some_and(|focused| any_ancestor_contains_focus(entity, focused, &cache))
+            && !next_disabled;
+        let next_ancestor_checked =
+            ancestor_checked(entity, &cache, &checked_lookup) && !next_disabled;
         let (next_active, next_hovered) = if next_disabled {
             (false, false)
         } else {
@@ -701,6 +1454,11 @@ fn sync_runtime_state(focus: Res<UiXmlFocus>, mut query: RuntimeStateQuery<'_, '
 
         if state.disabled == next_disabled
             && state.focused == next_focused
+            && state.focus_visible == next_focus_visible
+            && state.checked == next_checked
+            && state.focus_within == next_focus_within
+            && state.ancestor_checked == next_ancestor_checked
+            && state.ancestor_focus_within == next_ancestor_focus_within
             && state.active == next_active
             && state.hovered == next_hovered
         {
@@ -709,12 +1467,76 @@ fn sync_runtime_state(focus: Res<UiXmlFocus>, mut query: RuntimeStateQuery<'_, '
 
         state.disabled = next_disabled;
         state.focused = next_focused;
+        state.focus_visible = next_focus_visible;
+        state.checked = next_checked;
+        state.focus_within = next_focus_within;
+        state.ancestor_checked = next_ancestor_checked;
+        state.ancestor_focus_within = next_ancestor_focus_within;
         state.active = next_active;
         state.hovered = next_hovered;
+        state.set_changed();
         if disabled.0 {
             continue;
         }
     }
+}
+
+fn entity_contains_focus(
+    entity: Entity,
+    focused: Entity,
+    cache: &UiXmlSelectorContextCache,
+) -> bool {
+    if entity == focused {
+        return true;
+    }
+
+    let mut cursor = focused;
+    while let Some(context) = cache.entities.get(&cursor) {
+        let Some(parent) = context.parent else {
+            return false;
+        };
+        if parent == entity {
+            return true;
+        }
+        cursor = parent;
+    }
+    false
+}
+
+fn any_ancestor_contains_focus(
+    entity: Entity,
+    focused: Entity,
+    cache: &UiXmlSelectorContextCache,
+) -> bool {
+    let mut cursor = entity;
+    while let Some(context) = cache.entities.get(&cursor) {
+        let Some(parent) = context.parent else {
+            return false;
+        };
+        if entity_contains_focus(parent, focused, cache) {
+            return true;
+        }
+        cursor = parent;
+    }
+    false
+}
+
+fn ancestor_checked(
+    entity: Entity,
+    cache: &UiXmlSelectorContextCache,
+    checked_lookup: &Query<&UiXmlChecked>,
+) -> bool {
+    let mut cursor = entity;
+    while let Some(context) = cache.entities.get(&cursor) {
+        let Some(parent) = context.parent else {
+            return false;
+        };
+        if checked_lookup.get(parent).is_ok_and(|checked| checked.0) {
+            return true;
+        }
+        cursor = parent;
+    }
+    false
 }
 
 type InteractionStyleQuery<'w, 's> = Query<
@@ -728,6 +1550,9 @@ type InteractionStyleQuery<'w, 's> = Query<
         &'static mut BackgroundColor,
         &'static mut BorderColor,
         Option<&'static mut Outline>,
+        Option<&'static mut crate::render_effects::UiXmlUnsupportedEffects>,
+        Option<&'static mut crate::render_effects::UiXmlBorderColors>,
+        Option<&'static mut crate::render_effects::UiXmlRenderMaterialSpec>,
     ),
     Or<(Changed<UiXmlRuntimeState>, Changed<UiXmlStyleSource>)>,
 >;
@@ -744,6 +1569,9 @@ fn apply_interaction_styles(
         mut background,
         mut border,
         maybe_outline,
+        maybe_effects,
+        maybe_border_colors,
+        maybe_material_spec,
     ) in &mut query
     {
         let resolved = style_source.resolve(*runtime_state);
@@ -770,6 +1598,123 @@ fn apply_interaction_styles(
                 current.color = Color::NONE;
             }
             (None, None) => {}
+        }
+        match (maybe_effects, unsupported_effects_from_style(&resolved)) {
+            (Some(mut current), Some(next)) => *current = next,
+            (None, Some(next)) => {
+                commands.entity(entity).insert(next);
+            }
+            (Some(mut current), None) => current.effects.clear(),
+            (None, None) => {}
+        }
+        match (maybe_border_colors, border_colors_from_style(&resolved)) {
+            (Some(mut current), Some(next)) => *current = next,
+            (None, Some(next)) => {
+                commands.entity(entity).insert(next);
+            }
+            (Some(mut current), None) => {
+                current.top = None;
+                current.right = None;
+                current.bottom = None;
+                current.left = None;
+            }
+            (None, None) => {}
+        }
+        match (
+            maybe_material_spec,
+            render_material_spec_from_style(&resolved),
+        ) {
+            (Some(mut current), Some(next)) => *current = next,
+            (None, Some(next)) => {
+                commands.entity(entity).insert(next);
+            }
+            (Some(mut current), None) => {
+                current.background = None;
+                current.border_radius = None;
+                current.box_shadow = None;
+                current.filter = None;
+                current.backdrop_filter = None;
+                current.gradient = None;
+            }
+            (None, None) => {}
+        }
+    }
+}
+
+type EffectMaterialQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static UiXmlRuntimeState,
+        &'static UiXmlStyleSource,
+        Option<&'static mut UiXmlRenderMaterialSpec>,
+        Option<&'static Handle<UiXmlEffectMaterial>>,
+        &'static mut Style,
+        Option<&'static mut BorderColor>,
+        Option<&'static mut BackgroundColor>,
+    ),
+    (
+        With<UiXmlRenderMaterialSpec>,
+        Or<(Changed<UiXmlRuntimeState>, Changed<UiXmlStyleSource>)>,
+    ),
+>;
+
+fn apply_effect_materials(
+    mut commands: Commands<'_, '_>,
+    materials: Option<ResMut<Assets<UiXmlEffectMaterial>>>,
+    mut query: EffectMaterialQuery<'_, '_>,
+) {
+    let Some(mut materials) = materials else {
+        return;
+    };
+    for (
+        entity,
+        runtime_state,
+        style_source,
+        maybe_spec,
+        maybe_handle,
+        mut bevy_style,
+        maybe_border,
+        maybe_background,
+    ) in &mut query
+    {
+        let resolved = style_source.resolve(*runtime_state);
+        *bevy_style = to_bevy_style(&resolved);
+        let Some(next_spec) = render_material_spec_from_style(&resolved) else {
+            continue;
+        };
+        if let Some(mut spec) = maybe_spec {
+            *spec = next_spec.clone();
+        }
+        if let Some(mut border) = maybe_border {
+            border.0 = style_color(
+                resolved.border_color.as_deref(),
+                Color::NONE,
+                resolved.opacity,
+            );
+        }
+        if maybe_background.is_some() {
+            commands.entity(entity).remove::<BackgroundColor>();
+        }
+        let material = UiXmlEffectMaterial {
+            color: next_spec.background.unwrap_or_else(|| {
+                style_color(
+                    resolved.background.as_deref(),
+                    Color::NONE,
+                    resolved.opacity,
+                )
+            }),
+            radius: next_spec.radius_strength(),
+            shadow_alpha: next_spec.shadow_alpha(),
+        };
+        if let Some(handle) = maybe_handle {
+            if let Some(existing) = materials.get_mut(handle) {
+                *existing = material;
+            }
+        } else {
+            let handle = materials.add(material);
+            commands.entity(entity).insert(handle);
         }
     }
 }

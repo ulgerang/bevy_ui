@@ -6,6 +6,42 @@ pub struct UiXmlUnsupportedEffects {
     pub effects: Vec<UnsupportedEffect>,
 }
 
+#[derive(Component, Debug, Clone, PartialEq)]
+pub struct UiXmlBorderColors {
+    pub top: Option<Color>,
+    pub right: Option<Color>,
+    pub bottom: Option<Color>,
+    pub left: Option<Color>,
+}
+
+#[derive(Component, Debug, Clone, PartialEq)]
+pub struct UiXmlRenderMaterialSpec {
+    pub background: Option<Color>,
+    pub border_radius: Option<String>,
+    pub box_shadow: Option<String>,
+    pub filter: Option<String>,
+    pub backdrop_filter: Option<String>,
+    pub gradient: Option<String>,
+}
+
+impl UiXmlRenderMaterialSpec {
+    pub(crate) fn radius_strength(&self) -> f32 {
+        self.border_radius
+            .as_deref()
+            .and_then(|value| value.trim_end_matches("px").trim().parse::<f32>().ok())
+            .map(|value| (value / 64.0).clamp(0.0, 0.5))
+            .unwrap_or(0.0)
+    }
+
+    pub(crate) fn shadow_alpha(&self) -> f32 {
+        self.box_shadow
+            .as_ref()
+            .map(|_| 0.25)
+            .or_else(|| self.filter.as_ref().map(|_| 0.1))
+            .unwrap_or(0.0)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnsupportedEffect {
     BorderRadius(String),
@@ -53,4 +89,57 @@ pub(crate) fn unsupported_effects_from_style(style: &UiStyle) -> Option<UiXmlUns
     }
 
     (!effects.is_empty()).then_some(UiXmlUnsupportedEffects { effects })
+}
+
+pub(crate) fn border_colors_from_style(style: &UiStyle) -> Option<UiXmlBorderColors> {
+    let colors = UiXmlBorderColors {
+        top: style
+            .border_top_color
+            .as_deref()
+            .and_then(|color| crate::style::parse_color(Some(color))),
+        right: style
+            .border_right_color
+            .as_deref()
+            .and_then(|color| crate::style::parse_color(Some(color))),
+        bottom: style
+            .border_bottom_color
+            .as_deref()
+            .and_then(|color| crate::style::parse_color(Some(color))),
+        left: style
+            .border_left_color
+            .as_deref()
+            .and_then(|color| crate::style::parse_color(Some(color))),
+    };
+
+    (colors.top.is_some()
+        || colors.right.is_some()
+        || colors.bottom.is_some()
+        || colors.left.is_some())
+    .then_some(colors)
+}
+
+pub(crate) fn render_material_spec_from_style(style: &UiStyle) -> Option<UiXmlRenderMaterialSpec> {
+    let gradient = style
+        .background
+        .as_deref()
+        .filter(|value| value.contains("gradient"))
+        .map(str::to_string);
+    let spec = UiXmlRenderMaterialSpec {
+        background: style
+            .background
+            .as_deref()
+            .and_then(|color| crate::style::parse_color(Some(color))),
+        border_radius: style.border_radius.clone(),
+        box_shadow: style.box_shadow.clone(),
+        filter: style.filter.clone(),
+        backdrop_filter: style.backdrop_filter.clone(),
+        gradient,
+    };
+
+    (spec.border_radius.is_some()
+        || spec.box_shadow.is_some()
+        || spec.filter.is_some()
+        || spec.backdrop_filter.is_some()
+        || spec.gradient.is_some())
+    .then_some(spec)
 }

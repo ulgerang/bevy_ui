@@ -5,7 +5,7 @@ HTML/XML and CSS-like declarative UI for Bevy.
 This project is a Rust/Bevy take on the structure used by
 [`ebitenui-xml`](https://github.com/ulgerang/ebitenui-xml): UI hierarchy is
 defined in a familiar XML/HTML-like document, while visual and flex layout
-styles live in a CSS-like JSON stylesheet.
+styles live in a CSS-like JSON stylesheet or a bounded native CSS rule-block subset.
 
 ## Status
 
@@ -29,12 +29,24 @@ Supported selectors:
 
 - tag, class, and ID selectors: `button`, `.danger`, `#save`
 - compound selectors: `button.primary`, `button#save`
+- selector groups: `button, input`; each group member keeps its own
+  specificity and shares the original JSON source order
 - descendant and child selectors: `.menu button`, `.menu > button`
-- attribute selectors: `[disabled]`, `[type=submit]`
+- attribute selectors: `[disabled]`, `[type=submit]`, `[class~=primary]`,
+  `[lang|=en]`, `[href^=https]`, `[src$=.png]`, and `[data-id*=card]`
 - static disabled pseudo selector: `button:disabled` in computed styles
-- runtime `:hover`, `:active`, `:focus`, and `:disabled` styling for spawned UI
-  when `UiXmlPlugin` is installed
-- nested state styles: `hover`, `active`, `focus`, and `disabled`
+- terminal runtime `:hover`, `:active`, `:focus`, `:focus-visible`,
+  `:focus-within`, `:checked`, and `:disabled` styling for spawned UI when
+  `UiXmlPlugin` is installed
+- nested state styles: `hover`, `active`, `focus`, `focusVisible`,
+  `focusWithin`, `checked`, and `disabled` (kebab-case aliases are accepted in
+  JSON and normalized internally)
+
+Unsupported selector syntax is reported through `StyleSheet::diagnostics`.
+`::placeholder` is supported as a placeholder-style pseudo-element. Runtime
+selector-chain invalidation is supported for ancestor state forms that can be
+computed from retained entity context, such as `.form:focus-within .field` and
+`.tabs:checked > .panel`; full CSSOM-style invalidation remains out of scope.
 
 Bounded controls:
 
@@ -60,8 +72,14 @@ Text inputs:
 - `UiXmlTextChanged` is emitted only for crate-handled text edits.
 - Only the entity in `UiXmlFocus.entity` receives keyboard text.
 - Clicking a non-disabled text input sets `UiXmlFocus.entity`.
-- `ReceivedCharacter` appends non-control characters; `KeyCode::Back` removes
-  the last character.
+- `ReceivedCharacter` inserts non-control characters at `UiXmlTextCursor`;
+  `Back`, `Delete`, `Left`, `Right`, `Home`, and `End` provide bounded cursor
+  editing.
+- XML `placeholder` is display-only fallback text. It appears only while
+  `UiXmlTextValue` is empty, never mutates `UiXmlTextValue`, and never emits
+  `UiXmlTextChanged`.
+- Placeholder style uses either a JSON-native nested `placeholder` block or a
+  bounded CSS `input::placeholder` rule.
 
 ```rust
 use bevy::prelude::*;
@@ -101,26 +119,42 @@ fn main() {
 ```
 
 Supported style groups include sizing, padding, margin, border width/color,
-outline width/color/offset, absolute/relative positioning, overflow clipping,
-aspect ratio, flex direction, wrap, align/justify, gaps, flex grow/shrink/basis,
-background, text color, font size, text alignment/wrap, opacity, visibility,
-z-index, and display.
+border side widths, outline width/color/offset, absolute/relative positioning,
+`inset`, overflow clipping, aspect ratio, flex direction, wrap, align/justify,
+gaps, flex grow/shrink/basis, a bounded `flex` shorthand (`none`, `auto`,
+numeric grow, and grow/shrink/basis forms), background, text color, font size,
+font family/weight/style metadata, text alignment/wrap, opacity, visibility,
+z-index, display, JSON-native placeholder text style, and bounded native CSS rule blocks.
+
+Color parsing accepts deterministic Bevy-mappable subsets: hex colors including
+short `#rgb`/`#rgba`, `rgb()`/`rgba()` comma and space/slash forms, selected
+named colors, and first-stop gradient fallback. Length parsing accepts numbers,
+signed/decimal `px`, percentages, and `auto`; unsupported CSS units such as
+`em`, `rem`, `vh`, `vw`, and `calc()` fall back to Bevy `Val::Auto`.
 
 Unsupported JSON properties are recorded in `StyleSheet::diagnostics` instead
 of being silently ignored. Unsupported visual effects such as `boxShadow`,
 `borderRadius`, `filter`, and `backdropFilter` are also preserved on spawned
 entities as spawn-time `UiXmlUnsupportedEffects` metadata for a future custom
 material renderer. Runtime state restyling does not update these unsupported
-effect metadata snapshots.
+effect metadata snapshots. Side-specific border colors are captured as
+`UiXmlBorderColors` runtime metadata but are not rendered through Bevy UI
+0.12's single `BorderColor`.
 
 Runtime state styling is intentionally Bevy-scoped. XML `disabled` seeds a
 mutable `UiXmlDisabled` component during spawn; after that, the component is the
 source of truth. Runtime `:focus` styling uses the crate-owned `UiXmlFocus`
 resource; set `UiXmlFocus.entity` to the focused entity. Disabled entities do
-not become effectively focused. Text input supports a bounded focused-editing
-MVP. Cursor movement, text selection, IME/composition, placeholder rendering,
-validation, reset, submit behavior, and full form serialization are not
-implemented.
+not become effectively focused. `UiXmlInputModality` separates pointer focus
+from keyboard-visible focus for `:focus-visible`. Text input supports bounded
+cursor editing plus display-only placeholders. Forms support component-owned
+serialization, reset, submit, required-field validation events, validation-state
+components, and navigation-intent events. Text inputs support component-owned
+selection, in-memory clipboard request events, and Bevy IME preedit/commit
+events. `UiXmlRenderMaterialSpec` plus `UiXmlEffectMaterialPlugin` provide an opt-in
+Bevy `UiMaterial` shader path for effect-capable nodes. Full CSSOM, OS
+clipboard integration, and browser validation UI/navigation remain integration
+work outside this crate core.
 
 ## Example
 
@@ -206,3 +240,13 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
   crate does not provide a custom `AssetLoader` or hot reload contract.
 - Bevy dependency is pinned to `0.12.1` because this workspace currently uses
   Rust `1.75.0`.
+
+### Optional effect material renderer
+
+Projects using Bevy render/default plugins can opt into the included shader
+material path with `UiXmlEffectMaterialPlugin`. The core `UiXmlPlugin` remains
+headless-test friendly and only creates material handles when an
+`Assets<UiXmlEffectMaterial>` resource is present. The shader is intentionally a
+bounded first pass: it tints effect nodes, applies approximate rounded alpha,
+and darkens shadowed edges. It is not a browser renderer for filters, backdrop
+filters, or layout-affecting shadows.

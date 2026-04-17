@@ -13,6 +13,8 @@ Text controls use Bevy components as runtime sources of truth:
 - `UiXmlTextInput` marks executable text controls.
 - `UiXmlTextValue(pub String)` owns the mutable value after spawn.
 - `UiXmlTextDisplay(pub Entity)` links the control to its spawned text display.
+- `UiXmlTextPlaceholder` stores display-only placeholder text and text-style
+  presentation for the empty-value state.
 - `UiXmlControlName` and `UiXmlControlScope` expose optional form name and
   nearest form/document scope.
 - `UiXmlDisabled(pub bool)` remains the enabled/disabled source of truth.
@@ -26,10 +28,11 @@ does not drive runtime text behavior.
 
 Only the entity stored in `UiXmlFocus.entity` can receive text input.
 
-The runtime appends non-control `ReceivedCharacter` values to `UiXmlTextValue`.
-Pressed `KeyCode::Back` removes the last Unicode scalar value when the current
-value is non-empty. Each value mutation emits one `UiXmlTextChanged` event with
-the entity, scope, optional name, previous value, and new value.
+The runtime inserts non-control `ReceivedCharacter` values at
+`UiXmlTextCursor`. `KeyCode::Back` removes the scalar before the cursor,
+`Delete` removes the scalar at the cursor, and `Left`/`Right`/`Home`/`End` move
+the cursor. Each value mutation emits one `UiXmlTextChanged` event with the
+entity, scope, optional name, previous value, and new value.
 
 Clicking a non-disabled text input through Bevy `Interaction::Pressed` sets
 `UiXmlFocus.entity` to that input.
@@ -38,16 +41,35 @@ Disabled text inputs ignore clicks and keyboard input. Programmatic mutation of
 `UiXmlTextValue` does not emit events; external code that mutates values
 directly owns its own notification path.
 
+## Placeholder Semantics
+
+XML `placeholder` seeds fallback display text. The placeholder is shown only
+when `UiXmlTextValue` is empty. It is never copied into `UiXmlTextValue` and
+does not emit `UiXmlTextChanged` when it appears, disappears, or reappears.
+
+Placeholder styling is JSON-native through a nested `placeholder` block on the
+input style object, for example:
+
+```json
+{
+  "#email": {
+    "color": "white",
+    "fontSize": 16,
+    "placeholder": { "color": "gray", "fontSize": 12 }
+  }
+}
+```
+
+`::placeholder` selector syntax is supported as a bounded alias for the
+placeholder style block. The implementation maps placeholder text color and font
+size onto the existing child `TextBundle`; layout/render-heavy placeholder
+properties are not separate pseudo-elements.
+
 ## Deferred
 
-- Cursor position and text selection.
-- Delete, arrow keys, clipboard, composition/IME, and platform editing
-  shortcuts.
-- Placeholder rendering semantics.
-- Validation.
-- Reset behavior.
-- Submit behavior.
-- Full form serialization.
+- OS clipboard integration beyond the crate-owned in-memory clipboard resource.
+- Platform editing shortcuts beyond explicit request events and Bevy key events.
+- Browser validation UI.
 
 ## Consequences
 
@@ -55,3 +77,13 @@ This gives Bevy users a small executable text input contract without importing
 browser form semantics wholesale. The data path stays component-driven, and the
 deferred editing features can be added later without changing the initial value
 or event ownership model.
+
+## Selection, Clipboard, And IME
+
+`UiXmlTextSelection` stores an anchor/focus character range. Selection can be
+set explicitly with `UiXmlTextSelectAllRequested`, and character/IME/clipboard
+insertions replace the selected range. `UiXmlClipboard` is an in-memory Bevy
+resource used by `UiXmlClipboardCopyRequested`, `UiXmlClipboardCutRequested`,
+and `UiXmlClipboardPasteRequested`; it intentionally does not access the OS
+clipboard. `UiXmlImePreedit` records Bevy `Ime::Preedit`, while `Ime::Commit`
+inserts committed text through the same component-owned text mutation path.

@@ -7,6 +7,7 @@
 use thiserror::Error;
 
 mod builder;
+mod effect_material;
 mod parser;
 mod render_effects;
 mod runtime;
@@ -14,14 +15,23 @@ mod selector;
 mod style;
 
 pub use builder::{spawn_document, spawn_document_with_embedded_font, UiXmlBuilder};
+pub use effect_material::{UiXmlEffectMaterial, UiXmlEffectMaterialPlugin};
 pub use parser::{parse_layout, ElementNode, UiDocument};
-pub use render_effects::{UiXmlUnsupportedEffects, UnsupportedEffect};
+pub use render_effects::{
+    UiXmlBorderColors, UiXmlRenderMaterialSpec, UiXmlUnsupportedEffects, UnsupportedEffect,
+};
 pub use runtime::{
-    UiXmlChecked, UiXmlControlChanged, UiXmlControlKind, UiXmlControlName, UiXmlControlScope,
-    UiXmlControlValue, UiXmlDisabled, UiXmlDocumentOrder, UiXmlElement, UiXmlFocus, UiXmlForm,
-    UiXmlPlugin, UiXmlRuntimeState, UiXmlSelectorContext, UiXmlSelectorContextCache,
+    UiXmlChecked, UiXmlClipboard, UiXmlClipboardCopyRequested, UiXmlClipboardCutRequested,
+    UiXmlClipboardPasteRequested, UiXmlControlChanged, UiXmlControlKind, UiXmlControlName,
+    UiXmlControlScope, UiXmlControlValue, UiXmlDisabled, UiXmlDocumentOrder, UiXmlElement,
+    UiXmlFocus, UiXmlForm, UiXmlFormResetRequested, UiXmlFormSubmitRequested, UiXmlFormSubmitted,
+    UiXmlFormValidationFailed, UiXmlFormValue, UiXmlImePreedit, UiXmlInitialChecked,
+    UiXmlInitialTextValue, UiXmlInputModality, UiXmlNavigationRequested, UiXmlPlugin,
+    UiXmlRequired, UiXmlRuntimeState, UiXmlSelectorContext, UiXmlSelectorContextCache,
     UiXmlSelectorSnapshot, UiXmlStateStyles, UiXmlStyleRuntime, UiXmlStyleSource, UiXmlTextChanged,
-    UiXmlTextDisplay, UiXmlTextInput, UiXmlTextValue,
+    UiXmlTextCursor, UiXmlTextDisplay, UiXmlTextInput, UiXmlTextPlaceholder,
+    UiXmlTextSelectAllRequested, UiXmlTextSelection, UiXmlTextValue, UiXmlValidationState,
+    UiXmlValidationStateChanged,
 };
 pub use style::{
     AlignSelfValue, AlignValue, DisplayValue, EdgeSizes, FlexDirectionValue, FlexWrapValue,
@@ -43,12 +53,14 @@ pub enum BevyUiXmlError {
 mod tests {
     use super::*;
     use crate::render_effects::{outline_from_style, unsupported_effects_from_style};
+    use crate::runtime::RuntimeStyleInputs;
     use crate::selector::{Combinator, PseudoClass, Selector};
-    use crate::style::parse_color;
+    use crate::style::{parse_color, to_bevy_style};
     use bevy::input::keyboard::{KeyCode, KeyboardInput};
     use bevy::input::ButtonState;
     use bevy::prelude::*;
-    use bevy::window::ReceivedCharacter;
+    use bevy::ui::UiMaterial;
+    use bevy::window::{Ime, ReceivedCharacter};
 
     #[test]
     fn parses_html_like_xml() {
@@ -443,9 +455,24 @@ mod tests {
         let hover = sheet.runtime_state_style_for_path(&[&doc.root], PseudoClass::Hover);
         let active = sheet.runtime_state_style_for_path(&[&doc.root], PseudoClass::Active);
         let focus = sheet.runtime_state_style_for_path(&[&doc.root], PseudoClass::Focus);
+        let checked = sheet.runtime_state_style_for_path(&[&doc.root], PseudoClass::Checked);
+        let focus_within =
+            sheet.runtime_state_style_for_path(&[&doc.root], PseudoClass::FocusWithin);
+        let focus_visible =
+            sheet.runtime_state_style_for_path(&[&doc.root], PseudoClass::FocusVisible);
         let disabled = sheet.runtime_state_style_for_path(&[&doc.root], PseudoClass::Disabled);
-        let states =
-            UiXmlStateStyles::from_runtime_styles(&base, &hover, &active, &focus, &disabled);
+        let states = UiXmlStateStyles::from_runtime_styles(RuntimeStyleInputs {
+            base: &base,
+            hover: &hover,
+            active: &active,
+            focus: &focus,
+            checked: &checked,
+            focus_within: &focus_within,
+            focus_visible: &focus_visible,
+            ancestor_checked: &UiStyle::default(),
+            ancestor_focus_within: &UiStyle::default(),
+            disabled: &disabled,
+        });
 
         assert_eq!(base.background.as_deref(), Some("black"));
         assert_eq!(base.opacity, None);
@@ -502,6 +529,11 @@ mod tests {
                     hover,
                     active,
                     focus: UiStyle::default(),
+                    checked: UiStyle::default(),
+                    focus_within: UiStyle::default(),
+                    focus_visible: UiStyle::default(),
+                    ancestor_checked: UiStyle::default(),
+                    ancestor_focus_within: UiStyle::default(),
                     disabled,
                 },
                 Style::default(),
@@ -714,6 +746,34 @@ mod tests {
             .collect()
     }
 
+    fn drain_form_submitted(app: &mut App) -> Vec<UiXmlFormSubmitted> {
+        app.world
+            .resource_mut::<Events<UiXmlFormSubmitted>>()
+            .drain()
+            .collect()
+    }
+
+    fn drain_form_validation(app: &mut App) -> Vec<UiXmlFormValidationFailed> {
+        app.world
+            .resource_mut::<Events<UiXmlFormValidationFailed>>()
+            .drain()
+            .collect()
+    }
+
+    fn drain_navigation(app: &mut App) -> Vec<UiXmlNavigationRequested> {
+        app.world
+            .resource_mut::<Events<UiXmlNavigationRequested>>()
+            .drain()
+            .collect()
+    }
+
+    fn drain_validation_changed(app: &mut App) -> Vec<UiXmlValidationStateChanged> {
+        app.world
+            .resource_mut::<Events<UiXmlValidationStateChanged>>()
+            .drain()
+            .collect()
+    }
+
     fn press_control(app: &mut App, entity: Entity) {
         app.world.entity_mut(entity).insert(Interaction::Pressed);
         app.update();
@@ -739,6 +799,638 @@ mod tests {
                 window: Entity::from_raw(0),
             });
         app.update();
+    }
+
+    fn display_text(app: &App, entity: Entity) -> Text {
+        let display = app
+            .world
+            .entity(entity)
+            .get::<UiXmlTextDisplay>()
+            .unwrap()
+            .0;
+        app.world.entity(display).get::<Text>().unwrap().clone()
+    }
+
+    #[test]
+    fn selector_groups_attribute_operators_and_pseudo_elements_are_bounded() {
+        let doc = parse_layout(
+            r#"
+            <ui>
+                <button id="save" class="primary" data-tags="hero primary" lang="en-US"
+                    data-prefix="abc-value" data-suffix="panel.rs" data-sub="hello world"
+                    role="button">Save</button>
+                <input id="email" type="text" class="secondary" />
+            </ui>
+            "#,
+        )
+        .unwrap();
+        let button = &doc.root.children[0];
+        let input = &doc.root.children[1];
+        let sheet = StyleSheet::parse(
+            r##"{
+                "styles": {
+                    "button, #email": {"width": 100},
+                    ".primary": {"width": 180},
+                    ".secondary": {"width": 80},
+                    "button, ::placeholder": {"height": 30},
+                    "[role]": {"fontSize": 10},
+                    "[role=\"button\"]": {"outlineWidth": 1},
+                    "[data-tags~=primary]": {"color": "tomato"},
+                    "[lang|=en]": {"background": "royalblue"},
+                    "[data-prefix^=abc]": {"opacity": 0.8},
+                    "[data-suffix$='.rs']": {"zIndex": 4},
+                    "[data-sub*=lo wo]": {"outlineOffset": 2},
+                    "input::placeholder": {"color": "gray"}
+                }
+            }"##,
+        )
+        .unwrap();
+
+        let button_style = sheet.computed_style_for_path(&[&doc.root, button]);
+        let input_style = sheet.computed_style_for_path(&[&doc.root, input]);
+
+        assert_eq!(button_style.width, Some(Length::Px(180.0)));
+        assert_eq!(button_style.height, None);
+        assert_eq!(button_style.font_size, Some(10.0));
+        assert_eq!(button_style.outline_width, Some(Length::Px(1.0)));
+        assert_eq!(button_style.color.as_deref(), Some("tomato"));
+        assert_eq!(button_style.background.as_deref(), Some("royalblue"));
+        assert_eq!(button_style.opacity, Some(0.8));
+        assert_eq!(button_style.z_index, Some(4));
+        assert_eq!(button_style.outline_offset, Some(Length::Px(2.0)));
+        assert_eq!(input_style.width, Some(Length::Px(100.0)));
+        assert_eq!(input_style.height, None);
+        assert_eq!(
+            input_style
+                .placeholder
+                .as_deref()
+                .and_then(|style| style.color.as_deref()),
+            Some("gray")
+        );
+    }
+
+    #[test]
+    fn parses_native_css_stylesheet_and_placeholder_pseudo_element() {
+        let doc = parse_layout(
+            r#"
+            <ui>
+                <button id="save" class="primary">Save</button>
+                <input id="email" type="text" />
+            </ui>
+            "#,
+        )
+        .unwrap();
+        let button = &doc.root.children[0];
+        let input = &doc.root.children[1];
+        let sheet = StyleSheet::parse(
+            r##"
+            /* native CSS subset */
+            button, input { width: 100px; color: white; }
+            button.primary { width: 180; background: tomato; }
+            input::placeholder { color: gray; font-size: 12; }
+            "##,
+        )
+        .unwrap();
+
+        let button_style = sheet.computed_style_for_path(&[&doc.root, button]);
+        let input_style = sheet.computed_style_for_path(&[&doc.root, input]);
+        assert_eq!(button_style.width, Some(Length::Px(180.0)));
+        assert_eq!(button_style.background.as_deref(), Some("tomato"));
+        assert_eq!(input_style.width, Some(Length::Text("100px".to_string())));
+        assert_eq!(
+            input_style
+                .placeholder
+                .as_deref()
+                .and_then(|style| style.color.as_deref()),
+            Some("gray")
+        );
+        assert_eq!(
+            input_style
+                .placeholder
+                .as_deref()
+                .and_then(|style| style.font_size),
+            Some(12.0)
+        );
+    }
+
+    #[test]
+    fn dynamic_selector_chain_focus_within_and_checked_restylize_descendants() {
+        let mut app = spawn_test_app(
+            r#"
+            <ui id="root">
+                <form id="profile" class="form">
+                    <input id="field" type="text" class="field" />
+                </form>
+                <checkbox id="tabs" class="tabs">
+                    <panel id="panel" class="panel" />
+                </checkbox>
+            </ui>
+            "#,
+            r##"{
+                "styles": {
+                    ".field": {"background": "black"},
+                    ".form:focus-within .field": {"background": "tomato"},
+                    ".panel": {"background": "black"},
+                    ".tabs:checked > .panel": {"background": "gold"}
+                }
+            }"##,
+        );
+
+        let field = entity_by_id(&mut app, "field");
+        let tabs = entity_by_id(&mut app, "tabs");
+        let panel = entity_by_id(&mut app, "panel");
+
+        app.world.resource_mut::<UiXmlFocus>().entity = Some(field);
+        app.update();
+        app.update();
+        assert!(
+            app.world
+                .entity(field)
+                .get::<UiXmlRuntimeState>()
+                .unwrap()
+                .ancestor_focus_within
+        );
+        assert_eq!(
+            app.world
+                .entity(field)
+                .get::<UiXmlStyleSource>()
+                .unwrap()
+                .ancestor_focus_within
+                .background
+                .as_deref(),
+            Some("tomato")
+        );
+        assert_eq!(
+            app.world
+                .entity(field)
+                .get::<BackgroundColor>()
+                .unwrap()
+                .0
+                .as_rgba_u8(),
+            [255, 99, 71, 255]
+        );
+
+        app.world.entity_mut(tabs).insert(UiXmlChecked(true));
+        app.update();
+        assert_eq!(
+            app.world
+                .entity(panel)
+                .get::<BackgroundColor>()
+                .unwrap()
+                .0
+                .as_rgba_u8(),
+            [255, 215, 0, 255]
+        );
+    }
+
+    #[test]
+    fn terminal_runtime_pseudo_states_use_components_and_documented_precedence() {
+        let mut app = spawn_test_app(
+            r#"
+            <ui id="root">
+                <panel id="panel">
+                    <input id="agree" type="checkbox" checked="true" />
+                    <input id="field" type="text" />
+                </panel>
+            </ui>
+            "#,
+            r##"{
+                "styles": {
+                    "#panel": {"background": "black"},
+                    "#panel:focus-within": {"background": "royalblue"},
+                    "#agree": {"background": "black"},
+                    "#agree:checked": {"background": "gold"},
+                    "#agree:disabled": {"background": "gray"},
+                    "#field:focus-visible": {"outlineWidth": 3},
+                    "#field": {"focusVisible": {"outlineColor": "tomato"}}
+                }
+            }"##,
+        );
+
+        let panel = entity_by_id(&mut app, "panel");
+        let agree = entity_by_id(&mut app, "agree");
+        let field = entity_by_id(&mut app, "field");
+
+        assert_eq!(
+            app.world
+                .entity(agree)
+                .get::<BackgroundColor>()
+                .unwrap()
+                .0
+                .as_rgba_u8(),
+            [255, 215, 0, 255]
+        );
+
+        app.world.entity_mut(agree).insert(UiXmlChecked(false));
+        app.update();
+        assert_eq!(
+            app.world
+                .entity(agree)
+                .get::<BackgroundColor>()
+                .unwrap()
+                .0
+                .as_rgba_u8(),
+            [0, 0, 0, 255]
+        );
+
+        app.world.entity_mut(agree).insert(UiXmlChecked(true));
+        app.world.entity_mut(agree).insert(UiXmlDisabled(true));
+        app.update();
+        assert_eq!(
+            app.world
+                .entity(agree)
+                .get::<BackgroundColor>()
+                .unwrap()
+                .0
+                .as_rgba_u8(),
+            [128, 128, 128, 255]
+        );
+
+        app.world.resource_mut::<UiXmlFocus>().entity = Some(field);
+        app.update();
+        app.update();
+        assert!(
+            app.world
+                .entity(panel)
+                .get::<UiXmlRuntimeState>()
+                .unwrap()
+                .focus_within
+        );
+        assert!(
+            !app.world
+                .entity(panel)
+                .get::<UiXmlRuntimeState>()
+                .unwrap()
+                .disabled
+        );
+        assert!(
+            !app.world
+                .entity(panel)
+                .get::<UiXmlRuntimeState>()
+                .unwrap()
+                .hovered
+        );
+        assert_eq!(
+            app.world
+                .entity(panel)
+                .get::<UiXmlStyleSource>()
+                .unwrap()
+                .focus_within
+                .background
+                .as_deref(),
+            Some("royalblue")
+        );
+        assert!(app.world.entity(panel).contains::<Style>());
+        assert!(app.world.entity(panel).contains::<BorderColor>());
+        assert_eq!(
+            app.world
+                .entity(panel)
+                .get::<UiXmlStyleSource>()
+                .unwrap()
+                .resolve(*app.world.entity(panel).get::<UiXmlRuntimeState>().unwrap())
+                .background
+                .as_deref(),
+            Some("royalblue")
+        );
+        let outline = app.world.entity(field).get::<Outline>().unwrap();
+        assert_eq!(outline.width, Val::Px(3.0));
+        assert_eq!(outline.color.as_rgba_u8(), [255, 99, 71, 255]);
+        assert_eq!(
+            app.world
+                .entity(panel)
+                .get::<BackgroundColor>()
+                .unwrap()
+                .0
+                .as_rgba_u8(),
+            [65, 105, 225, 255]
+        );
+    }
+
+    #[test]
+    fn focus_visible_tracks_pointer_vs_keyboard_modality() {
+        let mut app = spawn_test_app(
+            r#"<ui id="root"><input id="field" type="text" /></ui>"#,
+            r##"{
+                "styles": {
+                    "#field:focus": {"outlineWidth": 1, "outlineColor": "gold"},
+                    "#field:focus-visible": {"outlineWidth": 4, "outlineColor": "tomato"}
+                }
+            }"##,
+        );
+
+        let field = entity_by_id(&mut app, "field");
+        app.world.entity_mut(field).insert(Interaction::Pressed);
+        app.update();
+        assert_eq!(app.world.resource::<UiXmlFocus>().entity, Some(field));
+        let outline = app.world.entity(field).get::<Outline>().unwrap();
+        assert_eq!(outline.color.as_rgba_u8(), [255, 215, 0, 255]);
+        assert_ne!(outline.width, Val::Px(4.0));
+
+        send_key(&mut app, KeyCode::Right);
+        let outline = app.world.entity(field).get::<Outline>().unwrap();
+        assert_eq!(outline.width, Val::Px(4.0));
+        assert_eq!(outline.color.as_rgba_u8(), [255, 99, 71, 255]);
+    }
+
+    #[test]
+    fn shorthands_typography_metadata_and_side_color_diagnostics_are_bounded() {
+        let doc = parse_layout(r#"<panel id="box"></panel>"#).unwrap();
+        let sheet = StyleSheet::parse(
+            r##"{
+                "styles": {
+                    "#box": {
+                        "position": "absolute",
+                        "inset": [1, "2px", "3%", 4],
+                        "flex": "2 0 10px",
+                        "borderTopWidth": 1,
+                        "borderRightWidth": 2,
+                        "borderBottomWidth": 3,
+                        "borderLeftWidth": 4,
+                        "borderTopColor": "tomato",
+                        "fontFamily": "Inter",
+                        "fontWeight": 700,
+                        "fontStyle": "italic"
+                    },
+                    "#bad": {"flex": "1 2 3 4"}
+                }
+            }"##,
+        )
+        .unwrap();
+
+        let style = sheet.computed_style(&doc.root);
+        assert_eq!(style.top, Some(Length::Px(1.0)));
+        assert_eq!(style.right, Some(Length::Text("2px".to_string())));
+        assert_eq!(style.bottom, Some(Length::Text("3%".to_string())));
+        assert_eq!(style.left, Some(Length::Px(4.0)));
+        assert_eq!(style.flex_grow, Some(2.0));
+        assert_eq!(style.flex_shrink, Some(0.0));
+        assert_eq!(style.flex_basis, Some(Length::Text("10px".to_string())));
+        assert_eq!(
+            style.font_family.as_ref().and_then(|value| value.as_str()),
+            Some("Inter")
+        );
+        assert_eq!(
+            style.font_weight.as_ref().and_then(|value| value.as_i64()),
+            Some(700)
+        );
+        assert_eq!(
+            style.font_style.as_ref().and_then(|value| value.as_str()),
+            Some("italic")
+        );
+
+        let bevy_style = to_bevy_style(&style);
+        assert_eq!(bevy_style.border.top, Val::Px(1.0));
+        assert_eq!(bevy_style.border.right, Val::Px(2.0));
+        assert_eq!(bevy_style.border.bottom, Val::Px(3.0));
+        assert_eq!(bevy_style.border.left, Val::Px(4.0));
+        assert_eq!(style.border_top_color.as_deref(), Some("tomato"));
+        assert!(sheet.diagnostics.iter().any(|diagnostic| matches!(
+            diagnostic,
+            StyleDiagnostic::UnsupportedProperty { property, .. } if property == "flex"
+        )));
+    }
+
+    #[test]
+    fn side_border_colors_and_unsupported_effects_are_runtime_metadata() {
+        let mut app = spawn_test_app(
+            r#"<ui id="root"><button id="card">Card</button></ui>"#,
+            r##"{
+                "styles": {
+                    "#card": {
+                        "borderColor": "white",
+                        "borderTopColor": "tomato",
+                        "boxShadow": "0 1px 2px black",
+                        "hover": {
+                            "borderTopColor": "gold",
+                            "boxShadow": "0 4px 8px black"
+                        }
+                    }
+                }
+            }"##,
+        );
+        let card = entity_by_id(&mut app, "card");
+        assert_eq!(
+            app.world
+                .entity(card)
+                .get::<BorderColor>()
+                .unwrap()
+                .0
+                .as_rgba_u8(),
+            [255, 255, 255, 255]
+        );
+        assert_eq!(
+            app.world
+                .entity(card)
+                .get::<UiXmlBorderColors>()
+                .unwrap()
+                .top
+                .unwrap()
+                .as_rgba_u8(),
+            [255, 99, 71, 255]
+        );
+
+        app.world.entity_mut(card).insert(Interaction::Hovered);
+        app.update();
+        assert_eq!(
+            app.world
+                .entity(card)
+                .get::<UiXmlBorderColors>()
+                .unwrap()
+                .top
+                .unwrap()
+                .as_rgba_u8(),
+            [255, 215, 0, 255]
+        );
+        assert!(app
+            .world
+            .entity(card)
+            .get::<UiXmlUnsupportedEffects>()
+            .unwrap()
+            .effects
+            .contains(&UnsupportedEffect::BoxShadow("0 4px 8px black".to_string())));
+        assert_eq!(
+            app.world
+                .entity(card)
+                .get::<UiXmlRenderMaterialSpec>()
+                .unwrap()
+                .box_shadow
+                .as_deref(),
+            Some("0 4px 8px black")
+        );
+    }
+
+    #[test]
+    fn effect_material_system_creates_custom_material_handles_for_effect_specs() {
+        let mut app = App::new();
+        app.add_plugins(UiXmlPlugin);
+        app.init_resource::<Assets<UiXmlEffectMaterial>>();
+
+        let style = UiStyle {
+            background: Some("tomato".to_string()),
+            border_radius: Some("8px".to_string()),
+            box_shadow: Some("0 4px 8px black".to_string()),
+            ..Default::default()
+        };
+        let entity = app
+            .world
+            .spawn((
+                UiXmlRuntimeState::default(),
+                UiXmlDisabled(false),
+                UiXmlStyleSource {
+                    base: style.clone(),
+                    hover: UiStyle::default(),
+                    active: UiStyle::default(),
+                    focus: UiStyle::default(),
+                    checked: UiStyle::default(),
+                    focus_within: UiStyle::default(),
+                    focus_visible: UiStyle::default(),
+                    ancestor_checked: UiStyle::default(),
+                    ancestor_focus_within: UiStyle::default(),
+                    disabled: UiStyle::default(),
+                },
+                UiXmlRenderMaterialSpec {
+                    background: Some(Color::rgb_u8(255, 99, 71)),
+                    border_radius: Some("8px".to_string()),
+                    box_shadow: Some("0 4px 8px black".to_string()),
+                    filter: None,
+                    backdrop_filter: None,
+                    gradient: None,
+                },
+                Style::default(),
+                BorderColor(Color::NONE),
+                BackgroundColor(Color::NONE),
+            ))
+            .id();
+
+        app.update();
+        let handle = app
+            .world
+            .entity(entity)
+            .get::<Handle<UiXmlEffectMaterial>>()
+            .unwrap();
+        let material = app
+            .world
+            .resource::<Assets<UiXmlEffectMaterial>>()
+            .get(handle)
+            .unwrap();
+        assert_eq!(material.color.as_rgba_u8(), [255, 99, 71, 255]);
+        assert!(material.radius > 0.0);
+        assert!(material.shadow_alpha > 0.0);
+        assert!(!app.world.entity(entity).contains::<BackgroundColor>());
+        assert!(matches!(
+            UiXmlEffectMaterial::fragment_shader(),
+            bevy::render::render_resource::ShaderRef::Path(_)
+        ));
+    }
+
+    #[test]
+    fn text_input_placeholder_is_display_only_and_json_styled() {
+        let mut app = spawn_test_app(
+            r#"
+            <ui id="root">
+                <input id="email" type="text" name="email" placeholder="Email" />
+                <input id="blocked" type="text" placeholder="Blocked" disabled="true" />
+            </ui>
+            "#,
+            r##"{
+                "styles": {
+                    "#email": {
+                        "color": "white",
+                        "fontSize": 16,
+                        "placeholder": {"color": "gray", "fontSize": 12}
+                    }
+                }
+            }"##,
+        );
+        assert!(drain_text_events(&mut app).is_empty());
+
+        let email = entity_by_id(&mut app, "email");
+        let mut text = display_text(&app, email);
+        assert_eq!(text.sections[0].value, "Email");
+        assert_eq!(
+            text.sections[0].style.color.as_rgba_u8(),
+            [128, 128, 128, 255]
+        );
+        assert_eq!(text.sections[0].style.font_size, 12.0);
+        assert_eq!(
+            app.world.entity(email).get::<UiXmlTextValue>().unwrap().0,
+            ""
+        );
+
+        app.world.resource_mut::<UiXmlFocus>().entity = Some(email);
+        send_character(&mut app, 'a');
+        let events = drain_text_events(&mut app);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].value, "a");
+        text = display_text(&app, email);
+        assert_eq!(text.sections[0].value, "a");
+        assert_eq!(
+            text.sections[0].style.color.as_rgba_u8(),
+            [255, 255, 255, 255]
+        );
+        assert_eq!(text.sections[0].style.font_size, 16.0);
+
+        send_key(&mut app, KeyCode::Back);
+        assert_eq!(drain_text_events(&mut app).len(), 1);
+        text = display_text(&app, email);
+        assert_eq!(text.sections[0].value, "Email");
+        assert_eq!(
+            app.world.entity(email).get::<UiXmlTextValue>().unwrap().0,
+            ""
+        );
+
+        app.world
+            .entity_mut(email)
+            .insert(UiXmlTextValue("programmatic".to_string()));
+        app.update();
+        assert!(drain_text_events(&mut app).is_empty());
+        assert_eq!(display_text(&app, email).sections[0].value, "programmatic");
+
+        app.world
+            .entity_mut(email)
+            .insert(UiXmlTextValue(String::new()));
+        app.update();
+        assert_eq!(display_text(&app, email).sections[0].value, "Email");
+
+        let blocked = entity_by_id(&mut app, "blocked");
+        app.world.resource_mut::<UiXmlFocus>().entity = Some(blocked);
+        send_character(&mut app, 'x');
+        assert!(drain_text_events(&mut app).is_empty());
+        assert_eq!(
+            app.world.entity(blocked).get::<UiXmlTextValue>().unwrap().0,
+            ""
+        );
+        assert_eq!(display_text(&app, blocked).sections[0].value, "Blocked");
+    }
+
+    #[test]
+    fn color_and_length_parsing_accepts_documented_subset() {
+        assert_eq!(
+            parse_color(Some("rgb(10 20 30 / 50%)")).map(|color| color.as_rgba_u8()),
+            Some([10, 20, 30, 127])
+        );
+        assert_eq!(
+            parse_color(Some("rgba(100%, 0%, 50%, 25%)")).map(|color| color.as_rgba_u8()),
+            Some([255, 0, 128, 63])
+        );
+        assert_eq!(
+            parse_color(Some("#0f08")).map(|color| color.as_rgba_u8()),
+            Some([0, 255, 0, 136])
+        );
+        assert_eq!(
+            Length::Text("-12.5px".to_string()).into_val(),
+            Val::Px(-12.5)
+        );
+        assert_eq!(
+            Length::Text("33.5%".to_string()).into_val(),
+            Val::Percent(33.5)
+        );
+        assert_eq!(Length::Text("auto".to_string()).into_val(), Val::Auto);
+        assert_eq!(Length::Text("1rem".to_string()).into_val(), Val::Auto);
+        assert_eq!(
+            Length::Text("calc(100% - 1px)".to_string()).into_val(),
+            Val::Auto
+        );
     }
 
     #[test]
@@ -775,13 +1467,18 @@ mod tests {
                     ..Default::default()
                 },
                 UiXmlDisabled(false),
-                UiXmlStyleSource::from_runtime_styles(
-                    &base,
-                    &UiStyle::default(),
-                    &UiStyle::default(),
-                    &sheet.runtime_state_style_for_path(&[&doc.root], PseudoClass::Focus),
-                    &UiStyle::default(),
-                ),
+                UiXmlStyleSource::from_runtime_styles(RuntimeStyleInputs {
+                    base: &base,
+                    hover: &UiStyle::default(),
+                    active: &UiStyle::default(),
+                    focus: &sheet.runtime_state_style_for_path(&[&doc.root], PseudoClass::Focus),
+                    checked: &UiStyle::default(),
+                    focus_within: &UiStyle::default(),
+                    focus_visible: &UiStyle::default(),
+                    ancestor_checked: &UiStyle::default(),
+                    ancestor_focus_within: &UiStyle::default(),
+                    disabled: &UiStyle::default(),
+                }),
                 Style::default(),
                 BackgroundColor(Color::NONE),
                 BorderColor(Color::NONE),
@@ -1117,6 +1814,79 @@ mod tests {
     }
 
     #[test]
+    fn forms_submit_serialize_validate_and_reset_current_controls() {
+        let mut app = spawn_test_app(
+            r#"
+            <ui id="root">
+                <form id="profile">
+                    <input id="email" type="text" name="email" required="true" />
+                    <input id="agree" type="checkbox" name="terms" value="yes" checked="true" />
+                    <input id="small" type="radio" name="size" value="s" />
+                    <input id="large" type="radio" name="size" value="l" checked="true" />
+                </form>
+            </ui>
+            "#,
+            r#"{}"#,
+        );
+        drain_text_events(&mut app);
+        drain_control_events(&mut app);
+
+        let form = entity_by_id(&mut app, "profile");
+        let email = entity_by_id(&mut app, "email");
+        app.world
+            .resource_mut::<Events<UiXmlFormSubmitRequested>>()
+            .send(UiXmlFormSubmitRequested { form });
+        app.update();
+        assert!(drain_form_submitted(&mut app).is_empty());
+        let validation = drain_form_validation(&mut app);
+        assert_eq!(validation.len(), 1);
+        assert_eq!(validation[0].entity, email);
+        assert_eq!(validation[0].reason, "required");
+
+        app.world.resource_mut::<UiXmlFocus>().entity = Some(email);
+        send_character(&mut app, 'a');
+        drain_text_events(&mut app);
+        app.world
+            .resource_mut::<Events<UiXmlFormSubmitRequested>>()
+            .send(UiXmlFormSubmitRequested { form });
+        app.update();
+        let submitted = drain_form_submitted(&mut app);
+        assert_eq!(submitted.len(), 1);
+        assert!(submitted[0].values.contains(&UiXmlFormValue {
+            name: "email".to_string(),
+            value: "a".to_string()
+        }));
+        assert!(submitted[0].values.contains(&UiXmlFormValue {
+            name: "terms".to_string(),
+            value: "yes".to_string()
+        }));
+        assert!(submitted[0].values.contains(&UiXmlFormValue {
+            name: "size".to_string(),
+            value: "l".to_string()
+        }));
+        assert_eq!(drain_navigation(&mut app).len(), 1);
+        assert!(drain_validation_changed(&mut app)
+            .iter()
+            .any(|event| event.entity == email && event.valid));
+
+        app.world
+            .resource_mut::<Events<UiXmlFormResetRequested>>()
+            .send(UiXmlFormResetRequested { form });
+        app.update();
+        assert_eq!(
+            app.world.entity(email).get::<UiXmlTextValue>().unwrap().0,
+            ""
+        );
+        let agree = entity_by_id(&mut app, "agree");
+        assert_eq!(
+            app.world.entity(agree).get::<UiXmlChecked>(),
+            Some(&UiXmlChecked(true))
+        );
+        assert!(drain_text_events(&mut app).is_empty());
+        assert!(drain_control_events(&mut app).is_empty());
+    }
+
+    #[test]
     fn controls_events_programmatic_checked_mutation_emits_no_event() {
         let mut app = spawn_test_app(
             r#"<ui id="root"><input id="agree" type="checkbox" /></ui>"#,
@@ -1252,6 +2022,152 @@ mod tests {
     }
 
     #[test]
+    fn text_input_cursor_navigation_insert_delete_and_programmatic_clamp() {
+        let mut app = spawn_test_app(
+            r#"<ui id="root"><input id="name" type="text" value="abcd" /></ui>"#,
+            r#"{}"#,
+        );
+        drain_text_events(&mut app);
+
+        let name = entity_by_id(&mut app, "name");
+        app.world.resource_mut::<UiXmlFocus>().entity = Some(name);
+
+        send_key(&mut app, KeyCode::Left);
+        send_key(&mut app, KeyCode::Left);
+        send_character(&mut app, 'X');
+        assert_eq!(
+            app.world.entity(name).get::<UiXmlTextValue>().unwrap().0,
+            "abXcd"
+        );
+        assert_eq!(
+            app.world
+                .entity(name)
+                .get::<UiXmlTextCursor>()
+                .unwrap()
+                .position,
+            3
+        );
+
+        send_key(&mut app, KeyCode::Back);
+        assert_eq!(
+            app.world.entity(name).get::<UiXmlTextValue>().unwrap().0,
+            "abcd"
+        );
+        send_key(&mut app, KeyCode::Home);
+        send_key(&mut app, KeyCode::Delete);
+        assert_eq!(
+            app.world.entity(name).get::<UiXmlTextValue>().unwrap().0,
+            "bcd"
+        );
+        send_key(&mut app, KeyCode::End);
+        assert_eq!(
+            app.world
+                .entity(name)
+                .get::<UiXmlTextCursor>()
+                .unwrap()
+                .position,
+            3
+        );
+        drain_text_events(&mut app);
+
+        app.world
+            .entity_mut(name)
+            .insert(UiXmlTextValue("z".to_string()));
+        app.update();
+        assert!(drain_text_events(&mut app).is_empty());
+        assert_eq!(
+            app.world
+                .entity(name)
+                .get::<UiXmlTextCursor>()
+                .unwrap()
+                .position,
+            1
+        );
+    }
+
+    #[test]
+    fn text_selection_clipboard_and_ime_use_component_owned_contracts() {
+        let mut app = spawn_test_app(
+            r#"<ui id="root"><input id="name" type="text" value="abcd" /></ui>"#,
+            r#"{}"#,
+        );
+        drain_text_events(&mut app);
+        let name = entity_by_id(&mut app, "name");
+        app.world.resource_mut::<UiXmlFocus>().entity = Some(name);
+
+        app.world
+            .resource_mut::<Events<UiXmlTextSelectAllRequested>>()
+            .send(UiXmlTextSelectAllRequested { entity: name });
+        app.update();
+        assert_eq!(
+            *app.world.entity(name).get::<UiXmlTextSelection>().unwrap(),
+            UiXmlTextSelection {
+                anchor: 0,
+                focus: 4
+            }
+        );
+
+        app.world
+            .resource_mut::<Events<UiXmlClipboardCopyRequested>>()
+            .send(UiXmlClipboardCopyRequested { entity: name });
+        app.update();
+        assert_eq!(app.world.resource::<UiXmlClipboard>().text, "abcd");
+
+        app.world
+            .resource_mut::<Events<UiXmlClipboardCutRequested>>()
+            .send(UiXmlClipboardCutRequested { entity: name });
+        app.update();
+        assert_eq!(
+            app.world.entity(name).get::<UiXmlTextValue>().unwrap().0,
+            ""
+        );
+        assert_eq!(drain_text_events(&mut app).len(), 1);
+
+        app.world
+            .resource_mut::<Events<UiXmlClipboardPasteRequested>>()
+            .send(UiXmlClipboardPasteRequested { entity: name });
+        app.update();
+        assert_eq!(
+            app.world.entity(name).get::<UiXmlTextValue>().unwrap().0,
+            "abcd"
+        );
+
+        app.world.resource_mut::<Events<Ime>>().send(Ime::Preedit {
+            window: Entity::from_raw(0),
+            value: "ㅎ".to_string(),
+            cursor: Some((1, 1)),
+        });
+        app.update();
+        assert_eq!(
+            app.world
+                .entity(name)
+                .get::<UiXmlImePreedit>()
+                .unwrap()
+                .value,
+            "ㅎ"
+        );
+        app.world.resource_mut::<Events<Ime>>().send(Ime::Commit {
+            window: Entity::from_raw(0),
+            value: "한".to_string(),
+        });
+        app.update();
+        assert!(app
+            .world
+            .entity(name)
+            .get::<UiXmlTextValue>()
+            .unwrap()
+            .0
+            .ends_with('한'));
+        assert!(app
+            .world
+            .entity(name)
+            .get::<UiXmlImePreedit>()
+            .unwrap()
+            .value
+            .is_empty());
+    }
+
+    #[test]
     fn text_input_click_sets_focus_and_disabled_input_ignores_keyboard() {
         let mut app = spawn_test_app(
             r#"
@@ -1328,7 +2244,9 @@ mod tests {
             .entity(card)
             .get::<UiXmlUnsupportedEffects>()
             .unwrap();
-        assert_eq!(&effects, after_hover);
+        assert!(after_hover.effects.contains(&UnsupportedEffect::BoxShadow(
+            "0 8px 16px black".to_string()
+        )));
         assert_eq!(
             app.world
                 .entity(card)

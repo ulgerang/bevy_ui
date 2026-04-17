@@ -51,3 +51,28 @@ Radios without a non-empty name are independent and are not grouped with each ot
 ## Consequences
 
 The first interactive form slice is limited to checkbox/radio behavior. Public names avoid claiming complete form semantics while still giving Bevy users explicit component/event contracts.
+
+## Form Serialization, Reset, Submit, And Validation
+
+Current form behavior remains Bevy-owned and event-driven rather than browser
+navigation-driven:
+
+- `UiXmlFormSubmitRequested { form }` asks the runtime to serialize and submit a
+  form scope.
+- `UiXmlFormSubmitted { form, values }` is emitted when required controls pass
+  validation.
+- `UiXmlFormValidationFailed` is emitted for required empty text controls and
+  blocks the submit event.
+- `UiXmlFormResetRequested { form }` restores checkbox/radio `UiXmlChecked` and
+  text `UiXmlTextValue` from XML-seeded initial components without emitting
+  control/text change events.
+- Serialization includes named text controls, checked checkboxes, and checked
+  radios in the requested form scope. Unnamed controls are omitted.
+
+Deferred browser form behavior still includes native validation UI, form action
+navigation, method/enctype handling, and full HTML form compatibility.
+
+`UiXmlValidationState` stores the latest component-owned validation state for
+required text inputs. Valid submissions also emit `UiXmlNavigationRequested` as
+a navigation intent event; the crate does not perform browser navigation, HTTP
+submission, or native validation UI.

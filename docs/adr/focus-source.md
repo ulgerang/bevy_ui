@@ -8,6 +8,11 @@ Runtime `:focus` styling is enabled through the crate-owned `UiXmlFocus` resourc
 
 `UiXmlRuntimeState.focused` is derived state used by the style runtime. External code should set `UiXmlFocus.entity`, not mutate `UiXmlRuntimeState.focused` directly.
 
+`:focus-visible` is a first-pass alias for this same crate-owned focus source.
+The crate does not currently track keyboard-vs-pointer modality, so it must not
+claim browser `:focus-visible` parity. `:focus-within` is derived from the same
+resource for the focused entity and its retained entity ancestors only.
+
 ## Drivers
 
 - Bevy UI does not provide browser focus semantics by default, so this crate needs an explicit source of truth before applying `:focus`.
@@ -24,6 +29,10 @@ Runtime `:focus` styling is enabled through the crate-owned `UiXmlFocus` resourc
 ## Consequences
 
 - `:focus` selectors and nested `focus` blocks can affect runtime styles when `UiXmlFocus.entity` points at the entity.
+- `:focus-visible` selectors and nested `focusVisible` blocks use the same
+  derived focus state in this implementation round.
+- Terminal `:focus-within` selectors and nested `focusWithin` blocks can style
+  the focused entity or an ancestor containing it.
 - Only one entity can be focused through the resource.
 - Disabled entities do not become effectively focused even if the resource still points at them.
 - Checkbox/radio behavior does not depend on focus.
@@ -31,4 +40,8 @@ Runtime `:focus` styling is enabled through the crate-owned `UiXmlFocus` resourc
 ## Follow-Ups
 
 - Define keyboard/gamepad navigation semantics in a future ADR.
+- Define input-modality semantics before making `:focus-visible` differ from
+  `:focus`.
+- Define a retained dynamic selector engine before supporting
+  `.form:focus-within .field` style restyling.
 - Define accessibility integration in a future ADR if needed.

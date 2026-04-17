@@ -1,9 +1,14 @@
-use crate::render_effects::{outline_from_style, unsupported_effects_from_style};
+use crate::render_effects::{
+    border_colors_from_style, outline_from_style, render_material_spec_from_style,
+    unsupported_effects_from_style,
+};
 use crate::runtime::{
-    UiXmlChecked, UiXmlControlKind, UiXmlControlName, UiXmlControlScope, UiXmlControlValue,
-    UiXmlDisabled, UiXmlDocumentOrder, UiXmlElement, UiXmlForm, UiXmlRuntimeState,
-    UiXmlSelectorContext, UiXmlStateStyles, UiXmlStyleSource, UiXmlTextDisplay, UiXmlTextInput,
-    UiXmlTextValue,
+    apply_text_presentation, RuntimeStyleInputs, UiXmlChecked, UiXmlControlKind, UiXmlControlName,
+    UiXmlControlScope, UiXmlControlValue, UiXmlDisabled, UiXmlDocumentOrder, UiXmlElement,
+    UiXmlForm, UiXmlImePreedit, UiXmlInitialChecked, UiXmlInitialTextValue, UiXmlRequired,
+    UiXmlRuntimeState, UiXmlSelectorContext, UiXmlStateStyles, UiXmlStyleSource, UiXmlTextCursor,
+    UiXmlTextDisplay, UiXmlTextInput, UiXmlTextPlaceholder, UiXmlTextSelection, UiXmlTextValue,
+    UiXmlValidationState,
 };
 use crate::selector::PseudoClass;
 use crate::style::{style_color, to_bevy_style, StyleSheet, UiStyle, VisibilityValue};
@@ -114,6 +119,21 @@ fn spawn_node<'a>(
     let focus_style = resources
         .stylesheet
         .runtime_state_style_for_path(&path, PseudoClass::Focus);
+    let checked_style = resources
+        .stylesheet
+        .runtime_state_style_for_path(&path, PseudoClass::Checked);
+    let focus_within_style = resources
+        .stylesheet
+        .runtime_state_style_for_path(&path, PseudoClass::FocusWithin);
+    let focus_visible_style = resources
+        .stylesheet
+        .runtime_state_style_for_path(&path, PseudoClass::FocusVisible);
+    let ancestor_checked_style = resources
+        .stylesheet
+        .runtime_ancestor_state_style_for_path(&path, PseudoClass::Checked);
+    let ancestor_focus_within_style = resources
+        .stylesheet
+        .runtime_ancestor_state_style_for_path(&path, PseudoClass::FocusWithin);
     let disabled_style = resources
         .stylesheet
         .runtime_state_style_for_path(&path, PseudoClass::Disabled);
@@ -122,13 +142,19 @@ fn spawn_node<'a>(
         disabled: disabled.0,
         ..Default::default()
     };
-    let style_source = UiXmlStyleSource::from_runtime_styles(
-        &style,
-        &hover_style,
-        &active_style,
-        &focus_style,
-        &disabled_style,
-    );
+    let runtime_styles = RuntimeStyleInputs {
+        base: &style,
+        hover: &hover_style,
+        active: &active_style,
+        focus: &focus_style,
+        checked: &checked_style,
+        focus_within: &focus_within_style,
+        focus_visible: &focus_visible_style,
+        ancestor_checked: &ancestor_checked_style,
+        ancestor_focus_within: &ancestor_focus_within_style,
+        disabled: &disabled_style,
+    };
+    let style_source = UiXmlStyleSource::from_runtime_styles(runtime_styles);
     let selector_context = UiXmlSelectorContext::from_node(node, parent_entity, &state.ancestors);
     let bevy_style = to_bevy_style(&style);
     let background = style_color(style.background.as_deref(), Color::NONE, style.opacity);
@@ -159,13 +185,7 @@ fn spawn_node<'a>(
                 .insert(runtime_state)
                 .insert(style_source)
                 .insert(selector_context)
-                .insert(UiXmlStateStyles::from_runtime_styles(
-                    &style,
-                    &hover_style,
-                    &active_style,
-                    &focus_style,
-                    &disabled_style,
-                ))
+                .insert(UiXmlStateStyles::from_runtime_styles(runtime_styles))
                 .id();
             attach_optional_render_components(commands, entity, &style);
             attach_widget_metadata(commands, entity, node, current_scope, order);
@@ -210,37 +230,44 @@ fn spawn_node<'a>(
                 .insert(runtime_state)
                 .insert(style_source)
                 .insert(selector_context)
-                .insert(UiXmlStateStyles::from_runtime_styles(
-                    &style,
-                    &hover_style,
-                    &active_style,
-                    &focus_style,
-                    &disabled_style,
-                ))
+                .insert(UiXmlStateStyles::from_runtime_styles(runtime_styles))
                 .insert(UiXmlTextInput)
-                .insert(UiXmlTextValue(
-                    node.attr("value").unwrap_or_default().to_string(),
-                ))
                 .id();
             attach_optional_render_components(commands, entity, &style);
             attach_widget_metadata(commands, entity, node, current_scope, order);
 
             let font = load_font(resources.asset_server, resources.default_font);
+            let text_value = UiXmlTextValue(node.attr("value").unwrap_or_default().to_string());
+            let text_cursor = UiXmlTextCursor {
+                position: text_value.0.chars().count(),
+            };
+            let placeholder = text_placeholder(node, &style, text_color, font_size);
             let mut display_entity = None;
             commands.entity(entity).with_children(|parent| {
-                display_entity = Some(
-                    parent
-                        .spawn(TextBundle::from_section(
-                            node.attr("value").unwrap_or_default().to_string(),
-                            TextStyle {
-                                font,
-                                font_size,
-                                color: text_color,
-                            },
-                        ))
-                        .id(),
-                );
+                let mut section = TextSection {
+                    value: String::new(),
+                    style: TextStyle {
+                        font,
+                        font_size,
+                        color: text_color,
+                    },
+                };
+                apply_text_presentation(&mut section, &text_value, placeholder.as_ref());
+                display_entity = Some(parent.spawn(TextBundle::from_sections([section])).id());
             });
+            commands.entity(entity).insert(text_value);
+            commands.entity(entity).insert(text_cursor);
+            commands.entity(entity).insert(UiXmlTextSelection {
+                anchor: text_cursor.position,
+                focus: text_cursor.position,
+            });
+            commands.entity(entity).insert(UiXmlImePreedit::default());
+            commands.entity(entity).insert(UiXmlInitialTextValue(
+                node.attr("value").unwrap_or_default().to_string(),
+            ));
+            if let Some(placeholder) = placeholder {
+                commands.entity(entity).insert(placeholder);
+            }
             if let Some(display_entity) = display_entity {
                 commands
                     .entity(entity)
@@ -341,6 +368,38 @@ fn spawn_node<'a>(
     }
 }
 
+fn text_placeholder(
+    node: &ElementNode,
+    style: &UiStyle,
+    value_color: Color,
+    value_font_size: f32,
+) -> Option<UiXmlTextPlaceholder> {
+    let placeholder_style = style.placeholder.as_deref();
+    let text = node
+        .attr("placeholder")
+        .map(str::to_string)
+        .unwrap_or_default();
+    if text.is_empty() && placeholder_style.is_none() {
+        return None;
+    }
+
+    Some(UiXmlTextPlaceholder {
+        text,
+        placeholder_color: placeholder_style
+            .and_then(|style| style.color.as_deref())
+            .map(|color| {
+                style_color(
+                    Some(color),
+                    value_color,
+                    placeholder_style.and_then(|s| s.opacity),
+                )
+            }),
+        placeholder_font_size: placeholder_style.and_then(|style| style.font_size),
+        value_color,
+        value_font_size,
+    })
+}
+
 fn add_children<'a>(
     commands: &mut Commands<'_, '_>,
     parent: Entity,
@@ -375,6 +434,12 @@ fn attach_optional_render_components(
     if let Some(effects) = unsupported_effects_from_style(style) {
         commands.entity(entity).insert(effects);
     }
+    if let Some(colors) = border_colors_from_style(style) {
+        commands.entity(entity).insert(colors);
+    }
+    if let Some(spec) = render_material_spec_from_style(style) {
+        commands.entity(entity).insert(spec);
+    }
 }
 
 fn attach_widget_metadata(
@@ -389,6 +454,13 @@ fn attach_widget_metadata(
     if node.widget_type() == "form" {
         commands.entity(entity).insert(UiXmlForm);
     }
+    if node.attr("required").is_some() {
+        commands.entity(entity).insert(UiXmlRequired(true));
+        commands.entity(entity).insert(UiXmlValidationState {
+            valid: true,
+            reason: None,
+        });
+    }
 
     let Some(kind) = control_kind(node) else {
         attach_text_input_metadata(commands, entity, node, current_scope);
@@ -400,6 +472,7 @@ fn attach_widget_metadata(
     entity_commands
         .insert(kind)
         .insert(UiXmlChecked(node.attr("checked").is_some()))
+        .insert(UiXmlInitialChecked(node.attr("checked").is_some()))
         .insert(UiXmlControlValue(
             node.attr("value").unwrap_or("on").to_string(),
         ))
