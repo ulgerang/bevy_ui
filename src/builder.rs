@@ -290,7 +290,7 @@ fn spawn_node<'a>(
                 },
             );
             if let Some(text_align) = style.text_align {
-                text.alignment = text_align.to_bevy();
+                text.justify = text_align.to_bevy();
             }
             if let Some(text_wrap) = style.text_wrap {
                 text.linebreak_behavior = text_wrap.to_bevy();

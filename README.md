@@ -139,7 +139,7 @@ entities as spawn-time `UiXmlUnsupportedEffects` metadata for a future custom
 material renderer. Runtime state restyling does not update these unsupported
 effect metadata snapshots. Side-specific border colors are captured as
 `UiXmlBorderColors` runtime metadata but are not rendered through Bevy UI
-0.12's single `BorderColor`.
+0.13's single `BorderColor`.
 
 Runtime state styling is intentionally Bevy-scoped. XML `disabled` seeds a
 mutable `UiXmlDisabled` component during spawn; after that, the component is the
@@ -238,8 +238,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
   font or non-ASCII glyph coverage.
 - Image `src` and default font paths are handed to Bevy `AssetServer`; this
   crate does not provide a custom `AssetLoader` or hot reload contract.
-- Bevy dependency is pinned to `0.12.1` because this workspace currently uses
-  Rust `1.75.0`.
+- Bevy dependency is pinned to `0.13.2` for the current compatibility target.
 
 ### Optional effect material renderer
 

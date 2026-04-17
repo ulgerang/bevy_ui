@@ -233,7 +233,7 @@ fn collect_style_diagnostics(
 fn unsupported_effect_reason(property: &str) -> Option<&'static str> {
     match property {
         "borderRadius" | "border-radius" => {
-            Some("Bevy UI 0.12 has no native rounded rectangle clipping")
+            Some("Bevy UI 0.13 has no native rounded rectangle clipping")
         }
         "boxShadow" | "box-shadow" => {
             Some("box shadows need a custom UI material or extra shadow geometry")
@@ -1156,11 +1156,11 @@ pub enum TextAlignValue {
 }
 
 impl TextAlignValue {
-    pub(crate) fn to_bevy(self) -> TextAlignment {
+    pub(crate) fn to_bevy(self) -> JustifyText {
         match self {
-            Self::Left => TextAlignment::Left,
-            Self::Center => TextAlignment::Center,
-            Self::Right => TextAlignment::Right,
+            Self::Left => JustifyText::Left,
+            Self::Center => JustifyText::Center,
+            Self::Right => JustifyText::Right,
         }
     }
 }

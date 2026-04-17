@@ -910,7 +910,7 @@ fn apply_text_input(
     }
 
     for received in received_characters.read() {
-        if received.char.is_control() {
+        if received.char.chars().any(char::is_control) {
             continue;
         }
         modality.focus_visible = true;
@@ -919,7 +919,7 @@ fn apply_text_input(
             &mut value.0,
             &mut cursor,
             &mut selection,
-            &received.char.to_string(),
+            received.char.as_str(),
         );
         send_text_changed(
             &mut events,
@@ -937,7 +937,7 @@ fn apply_text_input(
         }
         modality.focus_visible = true;
         match input.key_code {
-            Some(KeyCode::Back) => {
+            KeyCode::Backspace => {
                 let previous_value = value.0.clone();
                 if delete_selection(&mut value.0, &mut cursor, &mut selection) {
                     send_text_changed(
@@ -968,7 +968,7 @@ fn apply_text_input(
                     value.0.clone(),
                 );
             }
-            Some(KeyCode::Delete) => {
+            KeyCode::Delete => {
                 let previous_value = value.0.clone();
                 if delete_selection(&mut value.0, &mut cursor, &mut selection) {
                     send_text_changed(
@@ -998,22 +998,22 @@ fn apply_text_input(
                     value.0.clone(),
                 );
             }
-            Some(KeyCode::Left) => {
+            KeyCode::ArrowLeft => {
                 cursor.position = cursor.position.saturating_sub(1);
                 selection.anchor = cursor.position;
                 selection.focus = cursor.position;
             }
-            Some(KeyCode::Right) => {
+            KeyCode::ArrowRight => {
                 cursor.position = (cursor.position + 1).min(value.0.chars().count());
                 selection.anchor = cursor.position;
                 selection.focus = cursor.position;
             }
-            Some(KeyCode::Home) => {
+            KeyCode::Home => {
                 cursor.position = 0;
                 selection.anchor = 0;
                 selection.focus = 0;
             }
-            Some(KeyCode::End) => {
+            KeyCode::End => {
                 cursor.position = value.0.chars().count();
                 selection.anchor = cursor.position;
                 selection.focus = cursor.position;

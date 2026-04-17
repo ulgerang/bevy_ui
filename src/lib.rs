@@ -56,7 +56,7 @@ mod tests {
     use crate::runtime::RuntimeStyleInputs;
     use crate::selector::{Combinator, PseudoClass, Selector};
     use crate::style::{parse_color, to_bevy_style};
-    use bevy::input::keyboard::{KeyCode, KeyboardInput};
+    use bevy::input::keyboard::{Key, KeyCode, KeyboardInput};
     use bevy::input::ButtonState;
     use bevy::prelude::*;
     use bevy::ui::UiMaterial;
@@ -784,7 +784,7 @@ mod tests {
             .resource_mut::<Events<ReceivedCharacter>>()
             .send(ReceivedCharacter {
                 window: Entity::from_raw(0),
-                char: character,
+                char: character.to_string().into(),
             });
         app.update();
     }
@@ -793,8 +793,8 @@ mod tests {
         app.world
             .resource_mut::<Events<KeyboardInput>>()
             .send(KeyboardInput {
-                scan_code: 0,
-                key_code: Some(key_code),
+                key_code,
+                logical_key: Key::Unidentified(bevy::input::keyboard::NativeKey::Unidentified),
                 state: ButtonState::Pressed,
                 window: Entity::from_raw(0),
             });
@@ -1126,7 +1126,7 @@ mod tests {
         assert_eq!(outline.color.as_rgba_u8(), [255, 215, 0, 255]);
         assert_ne!(outline.width, Val::Px(4.0));
 
-        send_key(&mut app, KeyCode::Right);
+        send_key(&mut app, KeyCode::ArrowRight);
         let outline = app.world.entity(field).get::<Outline>().unwrap();
         assert_eq!(outline.width, Val::Px(4.0));
         assert_eq!(outline.color.as_rgba_u8(), [255, 99, 71, 255]);
@@ -1370,7 +1370,7 @@ mod tests {
         );
         assert_eq!(text.sections[0].style.font_size, 16.0);
 
-        send_key(&mut app, KeyCode::Back);
+        send_key(&mut app, KeyCode::Backspace);
         assert_eq!(drain_text_events(&mut app).len(), 1);
         text = display_text(&app, email);
         assert_eq!(text.sections[0].value, "Email");
@@ -2003,7 +2003,7 @@ mod tests {
             "hi!"
         );
 
-        send_key(&mut app, KeyCode::Back);
+        send_key(&mut app, KeyCode::Backspace);
         let key_events = drain_text_events(&mut app);
         assert_eq!(
             app.world
@@ -2032,8 +2032,8 @@ mod tests {
         let name = entity_by_id(&mut app, "name");
         app.world.resource_mut::<UiXmlFocus>().entity = Some(name);
 
-        send_key(&mut app, KeyCode::Left);
-        send_key(&mut app, KeyCode::Left);
+        send_key(&mut app, KeyCode::ArrowLeft);
+        send_key(&mut app, KeyCode::ArrowLeft);
         send_character(&mut app, 'X');
         assert_eq!(
             app.world.entity(name).get::<UiXmlTextValue>().unwrap().0,
@@ -2048,7 +2048,7 @@ mod tests {
             3
         );
 
-        send_key(&mut app, KeyCode::Back);
+        send_key(&mut app, KeyCode::Backspace);
         assert_eq!(
             app.world.entity(name).get::<UiXmlTextValue>().unwrap().0,
             "abcd"

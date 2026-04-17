@@ -8,7 +8,7 @@ repository = "https://github.com/ulgerang/bevy_ui"
 readme = "README.md"
 
 [dependencies]
-bevy = { version = "0.12.1", default-features = false, features = ["bevy_asset", "bevy_text", "bevy_ui", "default_font"] }
+bevy = { version = "0.13.2", default-features = false, features = ["bevy_asset", "bevy_text", "bevy_ui", "default_font"] }
 roxmltree = "0.21"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

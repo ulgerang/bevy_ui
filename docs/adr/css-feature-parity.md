@@ -13,7 +13,7 @@ This slice supports selector groups, CSS attribute operators, terminal and
 ancestor-state runtime pseudo-states, bounded shorthands, JSON-native and
 `::placeholder` styling, expanded color/length parsing, focus-visible modality,
 text cursor editing, form events, and runtime metadata where values map
-deterministically to Bevy UI 0.12.
+deterministically to Bevy UI 0.13.
 
 ## Supported Now
 

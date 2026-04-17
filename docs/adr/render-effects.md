@@ -8,14 +8,14 @@ Status: Accepted for Stage 10.
 
 Gradients are not rendered as gradients in this track; color parsing may use a
 deterministic first-stop fallback only. Side-specific border colors such as
-`borderTopColor` are diagnostic-only because Bevy UI 0.12 exposes one runtime
+`borderTopColor` are diagnostic-only because Bevy UI 0.13 exposes one runtime
 `BorderColor` for the entity.
 
 Runtime hover/active/disabled restyling updates Bevy-supported UI properties such as `Style`, colors, and `Outline`. It does not update or remove `UiXmlUnsupportedEffects`.
 
 ## Drivers
 
-- Bevy UI 0.12.1 does not provide browser-compatible rendering for these effects.
+- Bevy UI 0.13.2 does not provide browser-compatible rendering for these effects.
 - Custom material or render pipeline work would be larger than this form-control slice.
 - Public docs must not imply visual support for metadata-only properties.
 
