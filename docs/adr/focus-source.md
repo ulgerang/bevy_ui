@@ -45,3 +45,15 @@ resource for the focused entity and its retained entity ancestors only.
 - Define a retained dynamic selector engine before supporting
   `.form:focus-within .field` style restyling.
 - Define accessibility integration in a future ADR if needed.
+
+## Game Navigation
+
+`UiXmlFocusable` marks controls and opt-in nodes that can participate in game UI
+focus traversal. The runtime updates `UiXmlFocus` from keyboard/gamepad navigation
+and emits `UiXmlFocusChanged`, `UiXmlActivateRequested`, and `UiXmlBackRequested`
+for menu logic. Document order is the fallback traversal order, while `tabIndex`
+and directional `nav-*` / `focus-*` ID hints allow game-specific menu graphs.
+
+Pointer focus keeps `focus_visible=false`; keyboard/gamepad navigation sets it
+true so existing `:focus-visible` styles remain useful for controller/keyboard
+users. Disabled, hidden, and `display: none` focusables are skipped.

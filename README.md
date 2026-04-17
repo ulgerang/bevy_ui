@@ -63,6 +63,17 @@ Bounded controls:
 - Multiple initially checked radios in the same group normalize to the last
   radio in document order without emitting events.
 
+
+Game navigation:
+
+- Interactive controls are focusable by default: buttons, checkboxes, radios, and text inputs.
+- Non-control nodes can opt in with `focusable="true"` or `tabindex`/`tabIndex`.
+- `nav-up`, `nav-down`, `nav-left`, and `nav-right` (or `focus-*` aliases) can target element IDs for explicit directional navigation.
+- Keyboard navigation supports `Tab`, arrow keys, `Enter` activation, and `Escape` back intent.
+- Gamepad navigation supports D-pad/left-stick direction, South activation, and East back intent through Bevy gamepad events.
+- Navigation emits `UiXmlFocusChanged`, `UiXmlActivateRequested`, and `UiXmlBackRequested`; it updates `UiXmlFocus` and preserves `:focus-visible` semantics.
+- Disabled, hidden, and `display: none` focusables are skipped.
+
 Text inputs:
 
 - XML `value`, `name`, and `disabled` seed Bevy components during spawn; after

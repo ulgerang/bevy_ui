@@ -21,13 +21,14 @@ pub use render_effects::{
     UiXmlBorderColors, UiXmlRenderMaterialSpec, UiXmlUnsupportedEffects, UnsupportedEffect,
 };
 pub use runtime::{
-    UiXmlChecked, UiXmlClipboard, UiXmlClipboardCopyRequested, UiXmlClipboardCutRequested,
-    UiXmlClipboardPasteRequested, UiXmlControlChanged, UiXmlControlKind, UiXmlControlName,
-    UiXmlControlScope, UiXmlControlValue, UiXmlDisabled, UiXmlDocumentOrder, UiXmlElement,
-    UiXmlFocus, UiXmlForm, UiXmlFormResetRequested, UiXmlFormSubmitRequested, UiXmlFormSubmitted,
+    UiXmlActivateRequested, UiXmlBackRequested, UiXmlChecked, UiXmlClipboard,
+    UiXmlClipboardCopyRequested, UiXmlClipboardCutRequested, UiXmlClipboardPasteRequested,
+    UiXmlControlChanged, UiXmlControlKind, UiXmlControlName, UiXmlControlScope, UiXmlControlValue,
+    UiXmlDisabled, UiXmlDocumentOrder, UiXmlElement, UiXmlFocus, UiXmlFocusChanged, UiXmlFocusable,
+    UiXmlForm, UiXmlFormResetRequested, UiXmlFormSubmitRequested, UiXmlFormSubmitted,
     UiXmlFormValidationFailed, UiXmlFormValue, UiXmlImePreedit, UiXmlInitialChecked,
-    UiXmlInitialTextValue, UiXmlInputModality, UiXmlNavigationRequested, UiXmlPlugin,
-    UiXmlRequired, UiXmlRuntimeState, UiXmlSelectorContext, UiXmlSelectorContextCache,
+    UiXmlInitialTextValue, UiXmlInputModality, UiXmlNavigationDirection, UiXmlNavigationRequested,
+    UiXmlPlugin, UiXmlRequired, UiXmlRuntimeState, UiXmlSelectorContext, UiXmlSelectorContextCache,
     UiXmlSelectorSnapshot, UiXmlStateStyles, UiXmlStyleRuntime, UiXmlStyleSource, UiXmlTextChanged,
     UiXmlTextCursor, UiXmlTextDisplay, UiXmlTextInput, UiXmlTextPlaceholder,
     UiXmlTextSelectAllRequested, UiXmlTextSelection, UiXmlTextValue, UiXmlValidationState,
@@ -56,6 +57,10 @@ mod tests {
     use crate::runtime::RuntimeStyleInputs;
     use crate::selector::{Combinator, PseudoClass, Selector};
     use crate::style::{parse_color, to_bevy_style};
+    use bevy::input::gamepad::{
+        Gamepad, GamepadAxisChangedEvent, GamepadAxisType, GamepadButton, GamepadButtonInput,
+        GamepadButtonType,
+    };
     use bevy::input::keyboard::{Key, KeyCode, KeyboardInput};
     use bevy::input::ButtonState;
     use bevy::prelude::*;
@@ -760,6 +765,27 @@ mod tests {
             .collect()
     }
 
+    fn drain_focus_changed(app: &mut App) -> Vec<UiXmlFocusChanged> {
+        app.world
+            .resource_mut::<Events<UiXmlFocusChanged>>()
+            .drain()
+            .collect()
+    }
+
+    fn drain_activate(app: &mut App) -> Vec<UiXmlActivateRequested> {
+        app.world
+            .resource_mut::<Events<UiXmlActivateRequested>>()
+            .drain()
+            .collect()
+    }
+
+    fn drain_back(app: &mut App) -> Vec<UiXmlBackRequested> {
+        app.world
+            .resource_mut::<Events<UiXmlBackRequested>>()
+            .drain()
+            .collect()
+    }
+
     fn drain_navigation(app: &mut App) -> Vec<UiXmlNavigationRequested> {
         app.world
             .resource_mut::<Events<UiXmlNavigationRequested>>()
@@ -798,6 +824,27 @@ mod tests {
                 state: ButtonState::Pressed,
                 window: Entity::from_raw(0),
             });
+        app.update();
+    }
+
+    fn send_gamepad_button(app: &mut App, button_type: GamepadButtonType) {
+        app.world
+            .resource_mut::<Events<GamepadButtonInput>>()
+            .send(GamepadButtonInput {
+                button: GamepadButton::new(Gamepad::new(0), button_type),
+                state: ButtonState::Pressed,
+            });
+        app.update();
+    }
+
+    fn send_gamepad_axis(app: &mut App, axis_type: GamepadAxisType, value: f32) {
+        app.world
+            .resource_mut::<Events<GamepadAxisChangedEvent>>()
+            .send(GamepadAxisChangedEvent::new(
+                Gamepad::new(0),
+                axis_type,
+                value,
+            ));
         app.update();
     }
 
@@ -1130,6 +1177,99 @@ mod tests {
         let outline = app.world.entity(field).get::<Outline>().unwrap();
         assert_eq!(outline.width, Val::Px(4.0));
         assert_eq!(outline.color.as_rgba_u8(), [255, 99, 71, 255]);
+    }
+
+    #[test]
+    fn keyboard_navigation_traverses_focusables_and_emits_intents() {
+        let mut app = spawn_test_app(
+            r#"
+            <ui id="root">
+                <button id="start" nav-down="apply">Start</button>
+                <button id="disabled" disabled="true">Disabled</button>
+                <button id="apply">Apply</button>
+                <panel id="help" focusable="true">Help</panel>
+            </ui>
+            "#,
+            r#"{}"#,
+        );
+        let start = entity_by_id(&mut app, "start");
+        let apply = entity_by_id(&mut app, "apply");
+        let help = entity_by_id(&mut app, "help");
+        assert!(app.world.entity(start).contains::<UiXmlFocusable>());
+        assert!(app.world.entity(help).contains::<UiXmlFocusable>());
+
+        send_key(&mut app, KeyCode::Tab);
+        assert_eq!(app.world.resource::<UiXmlFocus>().entity, Some(start));
+        assert!(app.world.resource::<UiXmlInputModality>().focus_visible);
+        assert_eq!(drain_focus_changed(&mut app)[0].current, start);
+
+        send_key(&mut app, KeyCode::ArrowDown);
+        assert_eq!(app.world.resource::<UiXmlFocus>().entity, Some(apply));
+
+        send_key(&mut app, KeyCode::Tab);
+        assert_eq!(app.world.resource::<UiXmlFocus>().entity, Some(help));
+
+        send_key(&mut app, KeyCode::Enter);
+        assert_eq!(drain_activate(&mut app)[0].entity, help);
+
+        send_key(&mut app, KeyCode::Escape);
+        assert_eq!(drain_back(&mut app)[0].focused, Some(help));
+    }
+
+    #[test]
+    fn navigation_skips_hidden_and_display_none_focusables() {
+        let mut app = spawn_test_app(
+            r#"
+            <ui id="root">
+                <button id="visible">Visible</button>
+                <button id="hidden">Hidden</button>
+                <button id="none">None</button>
+                <button id="next">Next</button>
+            </ui>
+            "#,
+            r##"{
+                "styles": {
+                    "#hidden": {"visibility": "hidden"},
+                    "#none": {"display": "none"}
+                }
+            }"##,
+        );
+        let visible = entity_by_id(&mut app, "visible");
+        let next = entity_by_id(&mut app, "next");
+
+        send_key(&mut app, KeyCode::Tab);
+        assert_eq!(app.world.resource::<UiXmlFocus>().entity, Some(visible));
+        send_key(&mut app, KeyCode::Tab);
+        assert_eq!(app.world.resource::<UiXmlFocus>().entity, Some(next));
+    }
+
+    #[test]
+    fn gamepad_navigation_uses_dpad_stick_and_action_buttons() {
+        let mut app = spawn_test_app(
+            r#"
+            <ui id="root">
+                <button id="start">Start</button>
+                <button id="options">Options</button>
+                <button id="quit">Quit</button>
+            </ui>
+            "#,
+            r#"{}"#,
+        );
+        let start = entity_by_id(&mut app, "start");
+        let options = entity_by_id(&mut app, "options");
+        let quit = entity_by_id(&mut app, "quit");
+
+        send_gamepad_button(&mut app, GamepadButtonType::DPadDown);
+        assert_eq!(app.world.resource::<UiXmlFocus>().entity, Some(start));
+        send_gamepad_button(&mut app, GamepadButtonType::DPadDown);
+        assert_eq!(app.world.resource::<UiXmlFocus>().entity, Some(options));
+        send_gamepad_axis(&mut app, GamepadAxisType::LeftStickY, -1.0);
+        assert_eq!(app.world.resource::<UiXmlFocus>().entity, Some(quit));
+
+        send_gamepad_button(&mut app, GamepadButtonType::South);
+        assert_eq!(drain_activate(&mut app)[0].entity, quit);
+        send_gamepad_button(&mut app, GamepadButtonType::East);
+        assert_eq!(drain_back(&mut app)[0].focused, Some(quit));
     }
 
     #[test]

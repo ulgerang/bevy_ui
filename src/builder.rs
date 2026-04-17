@@ -5,10 +5,10 @@ use crate::render_effects::{
 use crate::runtime::{
     apply_text_presentation, RuntimeStyleInputs, UiXmlChecked, UiXmlControlKind, UiXmlControlName,
     UiXmlControlScope, UiXmlControlValue, UiXmlDisabled, UiXmlDocumentOrder, UiXmlElement,
-    UiXmlForm, UiXmlImePreedit, UiXmlInitialChecked, UiXmlInitialTextValue, UiXmlRequired,
-    UiXmlRuntimeState, UiXmlSelectorContext, UiXmlStateStyles, UiXmlStyleSource, UiXmlTextCursor,
-    UiXmlTextDisplay, UiXmlTextInput, UiXmlTextPlaceholder, UiXmlTextSelection, UiXmlTextValue,
-    UiXmlValidationState,
+    UiXmlFocusable, UiXmlForm, UiXmlImePreedit, UiXmlInitialChecked, UiXmlInitialTextValue,
+    UiXmlRequired, UiXmlRuntimeState, UiXmlSelectorContext, UiXmlStateStyles, UiXmlStyleSource,
+    UiXmlTextCursor, UiXmlTextDisplay, UiXmlTextInput, UiXmlTextPlaceholder, UiXmlTextSelection,
+    UiXmlTextValue, UiXmlValidationState,
 };
 use crate::selector::PseudoClass;
 use crate::style::{style_color, to_bevy_style, StyleSheet, UiStyle, VisibilityValue};
@@ -450,6 +450,7 @@ fn attach_widget_metadata(
     order: usize,
 ) {
     commands.entity(entity).insert(UiXmlDocumentOrder(order));
+    attach_focusable_metadata(commands, entity, node, order);
 
     if node.widget_type() == "form" {
         commands.entity(entity).insert(UiXmlForm);
@@ -485,6 +486,43 @@ fn attach_widget_metadata(
     {
         entity_commands.insert(UiXmlControlName(name.to_string()));
     }
+}
+
+fn attach_focusable_metadata(
+    commands: &mut Commands<'_, '_>,
+    entity: Entity,
+    node: &ElementNode,
+    order: usize,
+) {
+    let inherently_focusable = matches!(
+        node.widget_type(),
+        "button" | "checkbox" | "radio" | "text-input"
+    );
+    let focusable_attr = node.attr("focusable").is_some_and(|value| value != "false");
+    let tab_index = node
+        .attr("tabIndex")
+        .or_else(|| node.attr("tabindex"))
+        .and_then(|value| value.parse::<i32>().ok());
+    if !inherently_focusable && !focusable_attr && tab_index.is_none() {
+        return;
+    }
+
+    commands.entity(entity).insert(UiXmlFocusable {
+        order,
+        tab_index,
+        up: nav_attr(node, "up"),
+        down: nav_attr(node, "down"),
+        left: nav_attr(node, "left"),
+        right: nav_attr(node, "right"),
+    });
+}
+
+fn nav_attr(node: &ElementNode, direction: &str) -> Option<String> {
+    node.attr(&format!("nav-{direction}"))
+        .or_else(|| node.attr(&format!("focus-{direction}")))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn attach_text_input_metadata(

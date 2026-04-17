@@ -4,6 +4,10 @@ use crate::render_effects::{
 };
 use crate::style::{style_color, to_bevy_style, UiStyle};
 use crate::{ElementNode, UiXmlEffectMaterial};
+use bevy::ecs::system::SystemParam;
+use bevy::input::gamepad::{
+    GamepadAxisChangedEvent, GamepadAxisType, GamepadButtonInput, GamepadButtonType,
+};
 use bevy::input::keyboard::{KeyCode, KeyboardInput};
 use bevy::input::ButtonState;
 use bevy::prelude::*;
@@ -104,6 +108,42 @@ pub struct UiXmlNavigationRequested {
     pub action: Option<String>,
     pub method: Option<String>,
     pub values: Vec<UiXmlFormValue>,
+}
+
+#[derive(Component, Debug, Clone, PartialEq, Eq, Default)]
+pub struct UiXmlFocusable {
+    pub order: usize,
+    pub tab_index: Option<i32>,
+    pub up: Option<String>,
+    pub down: Option<String>,
+    pub left: Option<String>,
+    pub right: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiXmlNavigationDirection {
+    Next,
+    Previous,
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+#[derive(Event, Debug, Clone, PartialEq, Eq)]
+pub struct UiXmlFocusChanged {
+    pub previous: Option<Entity>,
+    pub current: Entity,
+}
+
+#[derive(Event, Debug, Clone, PartialEq, Eq)]
+pub struct UiXmlActivateRequested {
+    pub entity: Entity,
+}
+
+#[derive(Event, Debug, Clone, PartialEq, Eq)]
+pub struct UiXmlBackRequested {
+    pub focused: Option<Entity>,
 }
 
 #[derive(Event, Debug, Clone, PartialEq, Eq)]
@@ -495,6 +535,9 @@ pub struct UiXmlPlugin;
 impl Plugin for UiXmlPlugin {
     fn build(&self, app: &mut App) {
         app.add_event::<UiXmlControlChanged>()
+            .add_event::<UiXmlFocusChanged>()
+            .add_event::<UiXmlActivateRequested>()
+            .add_event::<UiXmlBackRequested>()
             .add_event::<UiXmlTextChanged>()
             .add_event::<UiXmlFormSubmitRequested>()
             .add_event::<UiXmlFormResetRequested>()
@@ -508,6 +551,8 @@ impl Plugin for UiXmlPlugin {
             .add_event::<UiXmlTextSelectAllRequested>()
             .add_event::<ReceivedCharacter>()
             .add_event::<KeyboardInput>()
+            .add_event::<GamepadButtonInput>()
+            .add_event::<GamepadAxisChangedEvent>()
             .add_event::<Ime>()
             .init_resource::<UiXmlClipboard>()
             .init_resource::<UiXmlStyleRuntime>()
@@ -520,8 +565,9 @@ impl Plugin for UiXmlPlugin {
                     register_selector_contexts,
                     mark_style_runtime_generation,
                     normalize_initial_radio_groups,
-                    focus_pressed_text_inputs,
+                    focus_pressed_focusables,
                     apply_control_interactions,
+                    apply_focus_navigation,
                     apply_text_selection_requests,
                     apply_clipboard_requests,
                     apply_text_input,
@@ -848,24 +894,315 @@ fn selected_text(value: &str, selection: UiXmlTextSelection) -> String {
         .collect()
 }
 
-type TextFocusInteractionQuery<'w, 's> = Query<
+type FocusPointerInteractionQuery<'w, 's> = Query<
     'w,
     's,
     (Entity, &'static Interaction, &'static UiXmlDisabled),
-    (With<UiXmlTextInput>, Changed<Interaction>),
+    (With<UiXmlFocusable>, Changed<Interaction>),
 >;
 
-fn focus_pressed_text_inputs(
+fn focus_pressed_focusables(
     mut focus: ResMut<UiXmlFocus>,
     mut modality: ResMut<UiXmlInputModality>,
-    query: TextFocusInteractionQuery<'_, '_>,
+    mut changed: EventWriter<UiXmlFocusChanged>,
+    query: FocusPointerInteractionQuery<'_, '_>,
 ) {
     for (entity, interaction, disabled) in &query {
         if *interaction == Interaction::Pressed && !disabled.0 {
+            let previous = focus.entity;
             focus.entity = Some(entity);
             modality.focus_visible = false;
+            if previous != Some(entity) {
+                changed.send(UiXmlFocusChanged {
+                    previous,
+                    current: entity,
+                });
+            }
         }
     }
+}
+
+type FocusableQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static UiXmlFocusable,
+        &'static UiXmlElement,
+        &'static UiXmlDisabled,
+        Option<&'static Visibility>,
+        Option<&'static Style>,
+        Option<&'static UiXmlTextInput>,
+    ),
+>;
+
+#[derive(SystemParam)]
+struct FocusNavigationInputs<'w, 's> {
+    keyboard_inputs: EventReader<'w, 's, KeyboardInput>,
+    gamepad_buttons: EventReader<'w, 's, GamepadButtonInput>,
+    gamepad_axes: EventReader<'w, 's, GamepadAxisChangedEvent>,
+}
+
+#[derive(SystemParam)]
+struct FocusNavigationOutputs<'w, 's> {
+    changed: EventWriter<'w, UiXmlFocusChanged>,
+    activate: EventWriter<'w, UiXmlActivateRequested>,
+    back: EventWriter<'w, UiXmlBackRequested>,
+    #[system_param(ignore)]
+    marker: std::marker::PhantomData<&'s ()>,
+}
+
+fn apply_focus_navigation(
+    mut focus: ResMut<UiXmlFocus>,
+    mut modality: ResMut<UiXmlInputModality>,
+    mut inputs: FocusNavigationInputs<'_, '_>,
+    mut outputs: FocusNavigationOutputs<'_, '_>,
+    focusables: FocusableQuery<'_, '_>,
+) {
+    for input in inputs.keyboard_inputs.read() {
+        if input.state != ButtonState::Pressed {
+            continue;
+        }
+        match input.key_code {
+            KeyCode::Tab => move_focus(
+                UiXmlNavigationDirection::Next,
+                &mut focus,
+                &mut modality,
+                &mut outputs.changed,
+                &focusables,
+            ),
+            KeyCode::ArrowDown => move_focus(
+                UiXmlNavigationDirection::Down,
+                &mut focus,
+                &mut modality,
+                &mut outputs.changed,
+                &focusables,
+            ),
+            KeyCode::ArrowUp => move_focus(
+                UiXmlNavigationDirection::Up,
+                &mut focus,
+                &mut modality,
+                &mut outputs.changed,
+                &focusables,
+            ),
+            KeyCode::ArrowRight if !focused_is_text_input(focus.entity, &focusables) => move_focus(
+                UiXmlNavigationDirection::Right,
+                &mut focus,
+                &mut modality,
+                &mut outputs.changed,
+                &focusables,
+            ),
+            KeyCode::ArrowLeft if !focused_is_text_input(focus.entity, &focusables) => move_focus(
+                UiXmlNavigationDirection::Left,
+                &mut focus,
+                &mut modality,
+                &mut outputs.changed,
+                &focusables,
+            ),
+            KeyCode::Enter => {
+                if let Some(entity) = focus.entity {
+                    modality.focus_visible = true;
+                    outputs.activate.send(UiXmlActivateRequested { entity });
+                }
+            }
+            KeyCode::Escape => {
+                modality.focus_visible = true;
+                outputs.back.send(UiXmlBackRequested {
+                    focused: focus.entity,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    for input in inputs.gamepad_buttons.read() {
+        if input.state != ButtonState::Pressed {
+            continue;
+        }
+        match input.button.button_type {
+            GamepadButtonType::DPadDown => move_focus(
+                UiXmlNavigationDirection::Down,
+                &mut focus,
+                &mut modality,
+                &mut outputs.changed,
+                &focusables,
+            ),
+            GamepadButtonType::DPadUp => move_focus(
+                UiXmlNavigationDirection::Up,
+                &mut focus,
+                &mut modality,
+                &mut outputs.changed,
+                &focusables,
+            ),
+            GamepadButtonType::DPadRight => move_focus(
+                UiXmlNavigationDirection::Right,
+                &mut focus,
+                &mut modality,
+                &mut outputs.changed,
+                &focusables,
+            ),
+            GamepadButtonType::DPadLeft => move_focus(
+                UiXmlNavigationDirection::Left,
+                &mut focus,
+                &mut modality,
+                &mut outputs.changed,
+                &focusables,
+            ),
+            GamepadButtonType::South => {
+                if let Some(entity) = focus.entity {
+                    modality.focus_visible = true;
+                    outputs.activate.send(UiXmlActivateRequested { entity });
+                }
+            }
+            GamepadButtonType::East => {
+                modality.focus_visible = true;
+                outputs.back.send(UiXmlBackRequested {
+                    focused: focus.entity,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    for input in inputs.gamepad_axes.read() {
+        let direction = match (input.axis_type, input.value) {
+            (GamepadAxisType::LeftStickX, value) if value > 0.5 => {
+                Some(UiXmlNavigationDirection::Right)
+            }
+            (GamepadAxisType::LeftStickX, value) if value < -0.5 => {
+                Some(UiXmlNavigationDirection::Left)
+            }
+            (GamepadAxisType::LeftStickY, value) if value > 0.5 => {
+                Some(UiXmlNavigationDirection::Up)
+            }
+            (GamepadAxisType::LeftStickY, value) if value < -0.5 => {
+                Some(UiXmlNavigationDirection::Down)
+            }
+            _ => None,
+        };
+        if let Some(direction) = direction {
+            move_focus(
+                direction,
+                &mut focus,
+                &mut modality,
+                &mut outputs.changed,
+                &focusables,
+            );
+        }
+    }
+}
+
+fn move_focus(
+    direction: UiXmlNavigationDirection,
+    focus: &mut UiXmlFocus,
+    modality: &mut UiXmlInputModality,
+    changed: &mut EventWriter<UiXmlFocusChanged>,
+    focusables: &FocusableQuery<'_, '_>,
+) {
+    let candidates = focusable_candidates(focusables);
+    if candidates.is_empty() {
+        return;
+    }
+    let previous = focus.entity;
+    let next = explicit_focus_target(previous, direction, &candidates)
+        .or_else(|| fallback_focus_target(previous, direction, &candidates))
+        .unwrap_or(candidates[0].entity);
+    focus.entity = Some(next);
+    modality.focus_visible = true;
+    if previous != Some(next) {
+        changed.send(UiXmlFocusChanged {
+            previous,
+            current: next,
+        });
+    }
+}
+
+#[derive(Clone)]
+struct FocusCandidate {
+    entity: Entity,
+    id: Option<String>,
+    order_key: (i32, usize),
+    focusable: UiXmlFocusable,
+}
+
+fn focusable_candidates(focusables: &FocusableQuery<'_, '_>) -> Vec<FocusCandidate> {
+    let mut candidates = focusables
+        .iter()
+        .filter(|(_, _, _, disabled, visibility, style, _)| {
+            !disabled.0
+                && !matches!(visibility, Some(Visibility::Hidden))
+                && !matches!(style.map(|style| style.display), Some(Display::None))
+        })
+        .map(|(entity, focusable, element, _, _, _, _)| FocusCandidate {
+            entity,
+            id: element.id.clone(),
+            order_key: (
+                focusable.tab_index.unwrap_or(focusable.order as i32),
+                focusable.order,
+            ),
+            focusable: focusable.clone(),
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|candidate| candidate.order_key);
+    candidates
+}
+
+fn explicit_focus_target(
+    current: Option<Entity>,
+    direction: UiXmlNavigationDirection,
+    candidates: &[FocusCandidate],
+) -> Option<Entity> {
+    let current = candidates
+        .iter()
+        .find(|candidate| Some(candidate.entity) == current)?;
+    let target_id = match direction {
+        UiXmlNavigationDirection::Up => current.focusable.up.as_deref(),
+        UiXmlNavigationDirection::Down => current.focusable.down.as_deref(),
+        UiXmlNavigationDirection::Left => current.focusable.left.as_deref(),
+        UiXmlNavigationDirection::Right => current.focusable.right.as_deref(),
+        UiXmlNavigationDirection::Next | UiXmlNavigationDirection::Previous => None,
+    }?;
+    candidates
+        .iter()
+        .find(|candidate| candidate.id.as_deref() == Some(target_id))
+        .map(|candidate| candidate.entity)
+}
+
+fn fallback_focus_target(
+    current: Option<Entity>,
+    direction: UiXmlNavigationDirection,
+    candidates: &[FocusCandidate],
+) -> Option<Entity> {
+    let current_index = current
+        .and_then(|entity| {
+            candidates
+                .iter()
+                .position(|candidate| candidate.entity == entity)
+        })
+        .unwrap_or(usize::MAX);
+    if current_index == usize::MAX {
+        return Some(candidates[0].entity);
+    }
+    match direction {
+        UiXmlNavigationDirection::Previous
+        | UiXmlNavigationDirection::Up
+        | UiXmlNavigationDirection::Left => {
+            Some(candidates[(current_index + candidates.len() - 1) % candidates.len()].entity)
+        }
+        UiXmlNavigationDirection::Next
+        | UiXmlNavigationDirection::Down
+        | UiXmlNavigationDirection::Right => {
+            Some(candidates[(current_index + 1) % candidates.len()].entity)
+        }
+    }
+}
+
+fn focused_is_text_input(current: Option<Entity>, focusables: &FocusableQuery<'_, '_>) -> bool {
+    current.is_some_and(|entity| {
+        focusables
+            .get(entity)
+            .is_ok_and(|(_, _, _, _, _, _, text_input)| text_input.is_some())
+    })
 }
 
 type TextInputMutationQuery<'w, 's> = Query<
