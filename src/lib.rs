@@ -28,16 +28,17 @@ pub use runtime::{
     UiXmlForm, UiXmlFormResetRequested, UiXmlFormSubmitRequested, UiXmlFormSubmitted,
     UiXmlFormValidationFailed, UiXmlFormValue, UiXmlImePreedit, UiXmlInitialChecked,
     UiXmlInitialTextValue, UiXmlInputModality, UiXmlNavigationDirection, UiXmlNavigationRequested,
-    UiXmlPlugin, UiXmlRequired, UiXmlRuntimeState, UiXmlSelectorContext, UiXmlSelectorContextCache,
-    UiXmlSelectorSnapshot, UiXmlStateStyles, UiXmlStyleRuntime, UiXmlStyleSource, UiXmlTextChanged,
-    UiXmlTextCursor, UiXmlTextDisplay, UiXmlTextInput, UiXmlTextPlaceholder,
-    UiXmlTextSelectAllRequested, UiXmlTextSelection, UiXmlTextValue, UiXmlValidationState,
-    UiXmlValidationStateChanged,
+    UiXmlOpen, UiXmlPlugin, UiXmlRequired, UiXmlRuntimeState, UiXmlSelected, UiXmlSelectorContext,
+    UiXmlSelectorContextCache, UiXmlSelectorSnapshot, UiXmlStateStyles, UiXmlStyleRuntime,
+    UiXmlStyleSource, UiXmlTextChanged, UiXmlTextCursor, UiXmlTextDisplay, UiXmlTextInput,
+    UiXmlTextPlaceholder, UiXmlTextSelectAllRequested, UiXmlTextSelection, UiXmlTextValue,
+    UiXmlThemeTokens, UiXmlTransitionState, UiXmlValidationState, UiXmlValidationStateChanged,
 };
 pub use style::{
     AlignSelfValue, AlignValue, DisplayValue, EdgeSizes, FlexDirectionValue, FlexWrapValue,
     JustifyValue, Length, OutlineStyle, OverflowValue, PositionValue, StyleDiagnostic, StyleSheet,
-    TextAlignValue, TextWrapValue, UiStyle, VisibilityValue,
+    TextAlignValue, TextWrapValue, TransitionEasing, TransitionProperty, TransitionStyle, UiStyle,
+    VisibilityValue,
 };
 
 #[derive(Debug, Error)]
@@ -66,6 +67,8 @@ mod tests {
     use bevy::prelude::*;
     use bevy::ui::UiMaterial;
     use bevy::window::{Ime, ReceivedCharacter};
+    use std::collections::HashMap;
+    use std::time::Duration;
 
     #[test]
     fn parses_html_like_xml() {
@@ -472,6 +475,10 @@ mod tests {
             active: &active,
             focus: &focus,
             checked: &checked,
+            selected: &UiStyle::default(),
+            open: &UiStyle::default(),
+            valid: &UiStyle::default(),
+            invalid: &UiStyle::default(),
             focus_within: &focus_within,
             focus_visible: &focus_visible,
             ancestor_checked: &UiStyle::default(),
@@ -535,6 +542,10 @@ mod tests {
                     active,
                     focus: UiStyle::default(),
                     checked: UiStyle::default(),
+                    selected: UiStyle::default(),
+                    open: UiStyle::default(),
+                    valid: UiStyle::default(),
+                    invalid: UiStyle::default(),
                     focus_within: UiStyle::default(),
                     focus_visible: UiStyle::default(),
                     ancestor_checked: UiStyle::default(),
@@ -583,6 +594,79 @@ mod tests {
                 .as_rgba_u8(),
             [30, 144, 255, 255]
         );
+    }
+
+    #[test]
+    fn transition_metadata_interpolates_background_over_time() {
+        let mut app = spawn_test_app(
+            r#"<ui id="root"><button id="start">Start</button></ui>"#,
+            r##"{
+                "styles": {
+                    "#start": {
+                        "background": "black",
+                        "transition": "background 1s linear",
+                        "hover": {"background": "white"}
+                    }
+                }
+            }"##,
+        );
+        let start = entity_by_id(&mut app, "start");
+        assert_eq!(
+            app.world
+                .entity(start)
+                .get::<UiXmlStyleSource>()
+                .unwrap()
+                .base
+                .transition
+                .as_ref()
+                .map(|transition| transition.property),
+            Some(TransitionProperty::Background)
+        );
+
+        app.world
+            .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                Duration::ZERO,
+            ));
+        app.world.entity_mut(start).insert(Interaction::Hovered);
+        app.update();
+        assert!(app.world.entity(start).contains::<UiXmlTransitionState>());
+        app.world
+            .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                Duration::from_millis(500),
+            ));
+        app.update();
+        let mid = app
+            .world
+            .entity(start)
+            .get::<BackgroundColor>()
+            .unwrap()
+            .0
+            .as_rgba_u8();
+        assert!(mid[0] > 0 && mid[0] < 255);
+
+        app.world
+            .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                Duration::from_secs(1),
+            ));
+        for _ in 0..4 {
+            app.update();
+        }
+        assert_eq!(
+            app.world
+                .entity(start)
+                .get::<BackgroundColor>()
+                .unwrap()
+                .0
+                .as_rgba_u8(),
+            [255, 255, 255, 255]
+        );
+
+        let unsupported =
+            StyleSheet::parse(r##"button { transition: width 1s linear; }"##).unwrap();
+        assert!(unsupported.diagnostics.iter().any(|diagnostic| matches!(
+            diagnostic,
+            StyleDiagnostic::UnsupportedProperty { property, .. } if property == "transition"
+        )));
     }
 
     #[test]
@@ -961,6 +1045,47 @@ mod tests {
     }
 
     #[test]
+    fn css_variables_and_theme_tokens_resolve_with_fallbacks() {
+        let doc = parse_layout(r#"<ui><button id="start">Start</button></ui>"#).unwrap();
+        let button = &doc.root.children[0];
+        let sheet = StyleSheet::parse(
+            r##"
+            :root { --accent: tomato; --gap: 12; }
+            button { color: var(--accent); width: var(--gap); background: var(--missing, gold); }
+            "##,
+        )
+        .unwrap();
+        let style = sheet.computed_style_for_path(&[&doc.root, button]);
+        assert_eq!(style.color.as_deref(), Some("tomato"));
+        assert_eq!(style.width, Some(Length::Px(12.0)));
+        assert_eq!(style.background.as_deref(), Some("gold"));
+
+        let mut theme = HashMap::new();
+        theme.insert(
+            "--accent".to_string(),
+            serde_json::Value::String("royalblue".to_string()),
+        );
+        let themed = StyleSheet::parse_with_theme_tokens(
+            r##":root { --accent: tomato; } button { color: var(--accent); }"##,
+            &theme,
+        )
+        .unwrap();
+        assert_eq!(
+            themed
+                .computed_style_for_path(&[&doc.root, button])
+                .color
+                .as_deref(),
+            Some("royalblue")
+        );
+
+        let unresolved = StyleSheet::parse(r##"button { color: var(--missing); }"##).unwrap();
+        assert!(unresolved.diagnostics.iter().any(|diagnostic| matches!(
+            diagnostic,
+            StyleDiagnostic::UnresolvedVariable { variable, .. } if variable == "--missing"
+        )));
+    }
+
+    #[test]
     fn dynamic_selector_chain_focus_within_and_checked_restylize_descendants() {
         let mut app = spawn_test_app(
             r#"
@@ -1027,6 +1152,89 @@ mod tests {
                 .0
                 .as_rgba_u8(),
             [255, 215, 0, 255]
+        );
+    }
+
+    #[test]
+    fn selected_open_valid_and_invalid_pseudo_states_follow_runtime_components() {
+        let mut app = spawn_test_app(
+            r#"
+            <ui id="root">
+                <panel id="slot" class="slot" />
+                <panel id="menu" class="dropdown" />
+                <input id="email" type="text" required="true" />
+                <button id="blocked" selected="true" disabled="true">Blocked</button>
+            </ui>
+            "#,
+            r##"{
+                "styles": {
+                    ".slot": {"background": "black", "selected": {"background": "gold"}},
+                    ".slot:selected": {"outlineWidth": 1, "outlineColor": "gold"},
+                    ".dropdown:open": {"background": "royalblue"},
+                    "#email:invalid": {"background": "tomato"},
+                    "#email:valid": {"outlineColor": "limegreen"},
+                    "#blocked:selected": {"background": "gold"},
+                    "#blocked:disabled": {"background": "gray"}
+                }
+            }"##,
+        );
+        let slot = entity_by_id(&mut app, "slot");
+        let menu = entity_by_id(&mut app, "menu");
+        let email = entity_by_id(&mut app, "email");
+        let blocked = entity_by_id(&mut app, "blocked");
+
+        app.world.entity_mut(slot).insert(UiXmlSelected(true));
+        app.world.entity_mut(menu).insert(UiXmlOpen(true));
+        app.world.entity_mut(email).insert(UiXmlValidationState {
+            valid: false,
+            reason: Some("required".to_string()),
+        });
+        app.update();
+
+        assert_eq!(
+            app.world
+                .entity(slot)
+                .get::<BackgroundColor>()
+                .unwrap()
+                .0
+                .as_rgba_u8(),
+            [255, 215, 0, 255]
+        );
+        assert_eq!(
+            app.world
+                .entity(slot)
+                .get::<Outline>()
+                .unwrap()
+                .color
+                .as_rgba_u8(),
+            [255, 215, 0, 255]
+        );
+        assert_eq!(
+            app.world
+                .entity(menu)
+                .get::<BackgroundColor>()
+                .unwrap()
+                .0
+                .as_rgba_u8(),
+            [65, 105, 225, 255]
+        );
+        assert_eq!(
+            app.world
+                .entity(email)
+                .get::<BackgroundColor>()
+                .unwrap()
+                .0
+                .as_rgba_u8(),
+            [255, 99, 71, 255]
+        );
+        assert_eq!(
+            app.world
+                .entity(blocked)
+                .get::<BackgroundColor>()
+                .unwrap()
+                .0
+                .as_rgba_u8(),
+            [128, 128, 128, 255]
         );
     }
 
@@ -1422,6 +1630,10 @@ mod tests {
                     active: UiStyle::default(),
                     focus: UiStyle::default(),
                     checked: UiStyle::default(),
+                    selected: UiStyle::default(),
+                    open: UiStyle::default(),
+                    valid: UiStyle::default(),
+                    invalid: UiStyle::default(),
                     focus_within: UiStyle::default(),
                     focus_visible: UiStyle::default(),
                     ancestor_checked: UiStyle::default(),
@@ -1613,6 +1825,10 @@ mod tests {
                     active: &UiStyle::default(),
                     focus: &sheet.runtime_state_style_for_path(&[&doc.root], PseudoClass::Focus),
                     checked: &UiStyle::default(),
+                    selected: &UiStyle::default(),
+                    open: &UiStyle::default(),
+                    valid: &UiStyle::default(),
+                    invalid: &UiStyle::default(),
                     focus_within: &UiStyle::default(),
                     focus_visible: &UiStyle::default(),
                     ancestor_checked: &UiStyle::default(),

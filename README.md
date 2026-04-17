@@ -129,6 +129,14 @@ fn main() {
 }
 ```
 
+
+Game CSS tokens and transitions:
+
+- Custom properties such as `--accent` can be declared in JSON/native CSS style maps.
+- `var(--token)` and `var(--token, fallback)` resolve through explicit theme tokens, root tokens, rule-local tokens, then fallback.
+- Runtime pseudo-states include `:selected`, `:open`, `:valid`, and `:invalid` for game widgets and validation styling.
+- `transition` supports a bounded subset for background/opacity-oriented polish; unsupported transition properties are diagnostics, not browser animation parity.
+
 Supported style groups include sizing, padding, margin, border width/color,
 border side widths, outline width/color/offset, absolute/relative positioning,
 `inset`, overflow clipping, aspect ratio, flex direction, wrap, align/justify,

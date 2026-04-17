@@ -27,6 +27,11 @@ pub enum StyleDiagnostic {
         selector: String,
         reason: String,
     },
+    UnresolvedVariable {
+        selector: String,
+        property: String,
+        variable: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +57,9 @@ fn normalize_style_object(
     let mut normalized = serde_json::Map::new();
 
     for (key, value) in object {
+        if key.starts_with("--") {
+            continue;
+        }
         let canonical = canonical_property_name(key).unwrap_or(key);
         match canonical {
             "inset" => expand_box_sides(&mut normalized, ["top", "right", "bottom", "left"], value),
@@ -68,6 +76,11 @@ fn normalize_style_object(
                 insert_edge_side(&mut normalized, "borderWidth", "bottom", value)
             }
             "borderLeftWidth" => insert_edge_side(&mut normalized, "borderWidth", "left", value),
+            "transition" => {
+                if value.as_str().and_then(parse_transition).is_some() {
+                    normalized.insert(canonical.to_string(), normalize_style_value(value));
+                }
+            }
             _ => {
                 normalized.insert(canonical.to_string(), normalize_style_value(value));
             }
@@ -188,6 +201,9 @@ fn collect_style_diagnostics(
     };
 
     for (property, nested) in object {
+        if property.starts_with("--") {
+            continue;
+        }
         if property == "placeholder" {
             collect_style_diagnostics(selector, nested, diagnostics);
             continue;
@@ -205,6 +221,14 @@ fn collect_style_diagnostics(
         }
 
         if property == "flex" && parse_flex_shorthand_value(nested).is_none() {
+            diagnostics.push(StyleDiagnostic::UnsupportedProperty {
+                selector: selector.to_string(),
+                property: property.clone(),
+            });
+            continue;
+        }
+
+        if property == "transition" && nested.as_str().and_then(parse_transition).is_none() {
             diagnostics.push(StyleDiagnostic::UnsupportedProperty {
                 selector: selector.to_string(),
                 property: property.clone(),
@@ -248,7 +272,8 @@ fn unsupported_effect_reason(property: &str) -> Option<&'static str> {
 
 fn matches_state_property(property: &str) -> Option<&str> {
     match property {
-        "hover" | "active" | "focus" | "disabled" | "checked" => Some(property),
+        "hover" | "active" | "focus" | "disabled" | "checked" | "selected" | "open" | "valid"
+        | "invalid" => Some(property),
         "focusWithin" | "focus-within" => Some("focusWithin"),
         "focusVisible" | "focus-visible" => Some("focusVisible"),
         _ => None,
@@ -315,6 +340,7 @@ fn canonical_property_name(property: &str) -> Option<&'static str> {
         "textAlign" | "text-align" => Some("textAlign"),
         "textWrap" | "text-wrap" => Some("textWrap"),
         "display" => Some("display"),
+        "transition" => Some("transition"),
         "placeholder" => Some("placeholder"),
         "borderRadius" | "border-radius" => Some("borderRadius"),
         "boxShadow" | "box-shadow" => Some("boxShadow"),
@@ -324,6 +350,10 @@ fn canonical_property_name(property: &str) -> Option<&'static str> {
         "active" => Some("active"),
         "focus" => Some("focus"),
         "checked" => Some("checked"),
+        "selected" => Some("selected"),
+        "open" => Some("open"),
+        "valid" => Some("valid"),
+        "invalid" => Some("invalid"),
         "focusWithin" | "focus-within" => Some("focusWithin"),
         "focusVisible" | "focus-visible" => Some("focusVisible"),
         "disabled" => Some("disabled"),
@@ -333,6 +363,13 @@ fn canonical_property_name(property: &str) -> Option<&'static str> {
 
 impl StyleSheet {
     pub fn parse(input: &str) -> Result<Self, BevyUiXmlError> {
+        Self::parse_with_theme_tokens(input, &HashMap::new())
+    }
+
+    pub fn parse_with_theme_tokens(
+        input: &str,
+        theme_tokens: &HashMap<String, serde_json::Value>,
+    ) -> Result<Self, BevyUiXmlError> {
         let value: serde_json::Value = match serde_json::from_str(input) {
             Ok(value) => value,
             Err(json_error) => parse_css_stylesheet(input).unwrap_or_else(|| {
@@ -355,12 +392,23 @@ impl StyleSheet {
         let mut styles = HashMap::new();
         let mut diagnostics = Vec::new();
         let mut rules = Vec::new();
+        let root_tokens = collect_root_tokens(styles_object);
 
         for (order, (selector, style_value)) in styles_object.iter().enumerate() {
-            collect_style_diagnostics(selector, style_value, &mut diagnostics);
             let (selector, style_value) =
                 normalize_pseudo_element_style(selector, style_value.clone());
-            let style: UiStyle = serde_json::from_value(normalize_style_value(&style_value))?;
+            let local_tokens = collect_custom_properties(&style_value);
+            let resolved_style_value = resolve_style_variables(
+                &selector,
+                &style_value,
+                theme_tokens,
+                &root_tokens,
+                &local_tokens,
+                &mut diagnostics,
+            );
+            collect_style_diagnostics(&selector, &resolved_style_value, &mut diagnostics);
+            let style: UiStyle =
+                serde_json::from_value(normalize_style_value(&resolved_style_value))?;
             styles.insert(selector.clone(), style.clone());
 
             let group_members = Selector::parse_group(&selector);
@@ -534,6 +582,122 @@ impl StyleSheet {
         style.apply_inline_attributes(node);
         style
     }
+}
+
+fn collect_root_tokens(
+    styles_object: &serde_json::Map<String, serde_json::Value>,
+) -> HashMap<String, serde_json::Value> {
+    let mut tokens = HashMap::new();
+    for (selector, value) in styles_object {
+        if selector == ":root" || selector == "root" || selector == "ui" {
+            tokens.extend(collect_custom_properties(value));
+        }
+    }
+    tokens
+}
+
+fn collect_custom_properties(value: &serde_json::Value) -> HashMap<String, serde_json::Value> {
+    value
+        .as_object()
+        .map(|object| {
+            object
+                .iter()
+                .filter(|(key, _)| key.starts_with("--"))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn resolve_style_variables(
+    selector: &str,
+    value: &serde_json::Value,
+    theme_tokens: &HashMap<String, serde_json::Value>,
+    root_tokens: &HashMap<String, serde_json::Value>,
+    local_tokens: &HashMap<String, serde_json::Value>,
+    diagnostics: &mut Vec<StyleDiagnostic>,
+) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(object) => serde_json::Value::Object(
+            object
+                .iter()
+                .filter(|(key, _)| !key.starts_with("--"))
+                .map(|(key, nested)| {
+                    (
+                        key.clone(),
+                        resolve_style_variables(
+                            selector,
+                            nested,
+                            theme_tokens,
+                            root_tokens,
+                            local_tokens,
+                            diagnostics,
+                        ),
+                    )
+                })
+                .collect(),
+        ),
+        serde_json::Value::Array(values) => serde_json::Value::Array(
+            values
+                .iter()
+                .map(|nested| {
+                    resolve_style_variables(
+                        selector,
+                        nested,
+                        theme_tokens,
+                        root_tokens,
+                        local_tokens,
+                        diagnostics,
+                    )
+                })
+                .collect(),
+        ),
+        serde_json::Value::String(text) => resolve_string_variable(
+            selector,
+            "",
+            text,
+            theme_tokens,
+            root_tokens,
+            local_tokens,
+            diagnostics,
+        )
+        .unwrap_or_else(|| value.clone()),
+        _ => value.clone(),
+    }
+}
+
+fn resolve_string_variable(
+    selector: &str,
+    property: &str,
+    text: &str,
+    theme_tokens: &HashMap<String, serde_json::Value>,
+    root_tokens: &HashMap<String, serde_json::Value>,
+    local_tokens: &HashMap<String, serde_json::Value>,
+    diagnostics: &mut Vec<StyleDiagnostic>,
+) -> Option<serde_json::Value> {
+    let trimmed = text.trim();
+    let body = trimmed.strip_prefix("var(")?.strip_suffix(')')?;
+    let (name, fallback) = body
+        .split_once(',')
+        .map(|(name, fallback)| (name.trim(), Some(fallback.trim())))
+        .unwrap_or((body.trim(), None));
+    let resolved = theme_tokens
+        .get(name)
+        .or_else(|| local_tokens.get(name))
+        .or_else(|| root_tokens.get(name))
+        .cloned();
+    if let Some(value) = resolved {
+        return Some(value);
+    }
+    if let Some(fallback) = fallback {
+        return Some(css_value_to_json(fallback));
+    }
+    diagnostics.push(StyleDiagnostic::UnresolvedVariable {
+        selector: selector.to_string(),
+        property: property.to_string(),
+        variable: name.to_string(),
+    });
+    None
 }
 
 fn normalize_pseudo_element_style(
@@ -711,11 +875,16 @@ pub struct UiStyle {
     pub filter: Option<String>,
     pub backdrop_filter: Option<String>,
     pub display: Option<DisplayValue>,
+    pub transition: Option<TransitionStyle>,
     pub placeholder: Option<Box<UiStyle>>,
     pub hover: Option<Box<UiStyle>>,
     pub active: Option<Box<UiStyle>>,
     pub focus: Option<Box<UiStyle>>,
     pub checked: Option<Box<UiStyle>>,
+    pub selected: Option<Box<UiStyle>>,
+    pub open: Option<Box<UiStyle>>,
+    pub valid: Option<Box<UiStyle>>,
+    pub invalid: Option<Box<UiStyle>>,
     pub focus_within: Option<Box<UiStyle>>,
     pub focus_visible: Option<Box<UiStyle>>,
     pub disabled: Option<Box<UiStyle>>,
@@ -787,11 +956,16 @@ impl UiStyle {
         merge_field!(filter);
         merge_field!(backdrop_filter);
         merge_field!(display);
+        merge_field!(transition);
         merge_field!(placeholder);
         merge_field!(hover);
         merge_field!(active);
         merge_field!(focus);
         merge_field!(checked);
+        merge_field!(selected);
+        merge_field!(open);
+        merge_field!(valid);
+        merge_field!(invalid);
         merge_field!(focus_within);
         merge_field!(focus_visible);
         merge_field!(disabled);
@@ -815,12 +989,115 @@ impl UiStyle {
         style.active = None;
         style.focus = None;
         style.checked = None;
+        style.selected = None;
+        style.open = None;
+        style.valid = None;
+        style.invalid = None;
         style.focus_within = None;
         style.focus_visible = None;
         style.disabled = None;
         style.placeholder = None;
         style
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(try_from = "String")]
+pub struct TransitionStyle {
+    pub property: TransitionProperty,
+    pub duration: f32,
+    pub easing: TransitionEasing,
+}
+
+impl TryFrom<String> for TransitionStyle {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        parse_transition(&value).ok_or_else(|| "unsupported transition".to_string())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransitionProperty {
+    Background,
+    Color,
+    Opacity,
+    OutlineColor,
+    OutlineWidth,
+    BorderColor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransitionEasing {
+    Linear,
+    Ease,
+    EaseIn,
+    EaseOut,
+}
+
+fn parse_transition(value: &str) -> Option<TransitionStyle> {
+    let mut property = None;
+    let mut duration = None;
+    let mut easing = TransitionEasing::Linear;
+    for part in value.split_whitespace() {
+        if property.is_none() {
+            property = parse_transition_property(part);
+            if property.is_some() {
+                continue;
+            }
+        }
+        if duration.is_none() {
+            duration = parse_duration(part);
+            if duration.is_some() {
+                continue;
+            }
+        }
+        if let Some(parsed) = parse_transition_easing(part) {
+            easing = parsed;
+        }
+    }
+
+    Some(TransitionStyle {
+        property: property?,
+        duration: duration?,
+        easing,
+    })
+}
+
+fn parse_transition_property(value: &str) -> Option<TransitionProperty> {
+    match value {
+        "background" | "backgroundColor" | "background-color" => {
+            Some(TransitionProperty::Background)
+        }
+        "color" => Some(TransitionProperty::Color),
+        "opacity" => Some(TransitionProperty::Opacity),
+        "outlineColor" | "outline-color" => Some(TransitionProperty::OutlineColor),
+        "outlineWidth" | "outline-width" => Some(TransitionProperty::OutlineWidth),
+        "borderColor" | "border-color" => Some(TransitionProperty::BorderColor),
+        _ => None,
+    }
+}
+
+fn parse_transition_easing(value: &str) -> Option<TransitionEasing> {
+    match value {
+        "linear" => Some(TransitionEasing::Linear),
+        "ease" => Some(TransitionEasing::Ease),
+        "ease-in" => Some(TransitionEasing::EaseIn),
+        "ease-out" => Some(TransitionEasing::EaseOut),
+        _ => None,
+    }
+}
+
+fn parse_duration(value: &str) -> Option<f32> {
+    value
+        .strip_suffix("ms")
+        .and_then(|ms| ms.parse::<f32>().ok())
+        .map(|ms| ms / 1000.0)
+        .or_else(|| {
+            value
+                .strip_suffix('s')
+                .and_then(|seconds| seconds.parse::<f32>().ok())
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

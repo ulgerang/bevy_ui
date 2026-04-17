@@ -2,7 +2,7 @@ use crate::render_effects::{
     border_colors_from_style, outline_from_style, render_material_spec_from_style,
     unsupported_effects_from_style, UiXmlRenderMaterialSpec,
 };
-use crate::style::{style_color, to_bevy_style, UiStyle};
+use crate::style::{style_color, to_bevy_style, TransitionProperty, UiStyle};
 use crate::{ElementNode, UiXmlEffectMaterial};
 use bevy::ecs::system::SystemParam;
 use bevy::input::gamepad::{
@@ -52,6 +52,12 @@ pub struct UiXmlForm;
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct UiXmlRequired(pub bool);
+
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UiXmlSelected(pub bool);
+
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UiXmlOpen(pub bool);
 
 #[derive(Component, Debug, Clone, PartialEq, Eq, Default)]
 pub struct UiXmlValidationState {
@@ -226,6 +232,11 @@ pub struct UiXmlClipboard {
     pub text: String,
 }
 
+#[derive(Resource, Debug, Clone, PartialEq, Default)]
+pub struct UiXmlThemeTokens {
+    pub tokens: HashMap<String, serde_json::Value>,
+}
+
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct UiXmlFocus {
     pub entity: Option<Entity>,
@@ -252,10 +263,23 @@ pub struct UiXmlRuntimeState {
     pub focused: bool,
     pub focus_visible: bool,
     pub checked: bool,
+    pub selected: bool,
+    pub open: bool,
+    pub valid: bool,
+    pub invalid: bool,
     pub focus_within: bool,
     pub ancestor_checked: bool,
     pub ancestor_focus_within: bool,
     pub style_generation: u64,
+}
+
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct UiXmlTransitionState {
+    pub property: TransitionProperty,
+    pub from: Color,
+    pub to: Color,
+    pub elapsed: f32,
+    pub duration: f32,
 }
 
 #[derive(Component, Debug, Clone)]
@@ -265,6 +289,10 @@ pub struct UiXmlStyleSource {
     pub active: UiStyle,
     pub focus: UiStyle,
     pub checked: UiStyle,
+    pub selected: UiStyle,
+    pub open: UiStyle,
+    pub valid: UiStyle,
+    pub invalid: UiStyle,
     pub focus_within: UiStyle,
     pub focus_visible: UiStyle,
     pub ancestor_checked: UiStyle,
@@ -279,6 +307,10 @@ pub(crate) struct RuntimeStyleInputs<'a> {
     pub(crate) active: &'a UiStyle,
     pub(crate) focus: &'a UiStyle,
     pub(crate) checked: &'a UiStyle,
+    pub(crate) selected: &'a UiStyle,
+    pub(crate) open: &'a UiStyle,
+    pub(crate) valid: &'a UiStyle,
+    pub(crate) invalid: &'a UiStyle,
     pub(crate) focus_within: &'a UiStyle,
     pub(crate) focus_visible: &'a UiStyle,
     pub(crate) ancestor_checked: &'a UiStyle,
@@ -294,6 +326,10 @@ impl UiXmlStyleSource {
             active: state_overlay(styles.active, styles.base.active.as_deref()),
             focus: state_overlay(styles.focus, styles.base.focus.as_deref()),
             checked: state_overlay(styles.checked, styles.base.checked.as_deref()),
+            selected: state_overlay(styles.selected, styles.base.selected.as_deref()),
+            open: state_overlay(styles.open, styles.base.open.as_deref()),
+            valid: state_overlay(styles.valid, styles.base.valid.as_deref()),
+            invalid: state_overlay(styles.invalid, styles.base.invalid.as_deref()),
             focus_within: state_overlay(styles.focus_within, styles.base.focus_within.as_deref()),
             focus_visible: state_overlay(
                 styles.focus_visible,
@@ -313,6 +349,18 @@ impl UiXmlStyleSource {
         }
         if runtime_state.checked {
             style.merge(&self.checked);
+        }
+        if runtime_state.selected {
+            style.merge(&self.selected);
+        }
+        if runtime_state.open {
+            style.merge(&self.open);
+        }
+        if runtime_state.valid {
+            style.merge(&self.valid);
+        }
+        if runtime_state.invalid {
+            style.merge(&self.invalid);
         }
         if runtime_state.ancestor_checked {
             style.merge(&self.ancestor_checked);
@@ -435,6 +483,10 @@ pub struct UiXmlStateStyles {
     disabled: Option<UiStyle>,
     focus: Option<UiStyle>,
     checked: Option<UiStyle>,
+    selected: Option<UiStyle>,
+    open: Option<UiStyle>,
+    valid: Option<UiStyle>,
+    invalid: Option<UiStyle>,
     focus_within: Option<UiStyle>,
     focus_visible: Option<UiStyle>,
     ancestor_checked: Option<UiStyle>,
@@ -452,6 +504,10 @@ impl UiXmlStateStyles {
             disabled: style.disabled.as_deref().map(UiStyle::without_state_styles),
             focus: style.focus.as_deref().map(UiStyle::without_state_styles),
             checked: style.checked.as_deref().map(UiStyle::without_state_styles),
+            selected: style.selected.as_deref().map(UiStyle::without_state_styles),
+            open: style.open.as_deref().map(UiStyle::without_state_styles),
+            valid: style.valid.as_deref().map(UiStyle::without_state_styles),
+            invalid: style.invalid.as_deref().map(UiStyle::without_state_styles),
             focus_within: style
                 .focus_within
                 .as_deref()
@@ -474,6 +530,16 @@ impl UiXmlStateStyles {
             checked: Some(state_overlay(
                 styles.checked,
                 styles.base.checked.as_deref(),
+            )),
+            selected: Some(state_overlay(
+                styles.selected,
+                styles.base.selected.as_deref(),
+            )),
+            open: Some(state_overlay(styles.open, styles.base.open.as_deref())),
+            valid: Some(state_overlay(styles.valid, styles.base.valid.as_deref())),
+            invalid: Some(state_overlay(
+                styles.invalid,
+                styles.base.invalid.as_deref(),
             )),
             focus_within: Some(state_overlay(
                 styles.focus_within,
@@ -502,6 +568,18 @@ impl UiXmlStateStyles {
         }
         if let Some(checked) = &self.checked {
             style.merge(checked);
+        }
+        if let Some(selected) = &self.selected {
+            style.merge(selected);
+        }
+        if let Some(open) = &self.open {
+            style.merge(open);
+        }
+        if let Some(valid) = &self.valid {
+            style.merge(valid);
+        }
+        if let Some(invalid) = &self.invalid {
+            style.merge(invalid);
         }
         if let Some(ancestor_checked) = &self.ancestor_checked {
             style.merge(ancestor_checked);
@@ -555,6 +633,7 @@ impl Plugin for UiXmlPlugin {
             .add_event::<GamepadAxisChangedEvent>()
             .add_event::<Ime>()
             .init_resource::<UiXmlClipboard>()
+            .init_resource::<UiXmlThemeTokens>()
             .init_resource::<UiXmlStyleRuntime>()
             .init_resource::<UiXmlFocus>()
             .init_resource::<UiXmlInputModality>()
@@ -577,6 +656,7 @@ impl Plugin for UiXmlPlugin {
                     sync_text_display,
                     sync_runtime_state,
                     apply_interaction_styles,
+                    update_transition_styles,
                     apply_effect_materials,
                 )
                     .chain(),
@@ -1753,6 +1833,9 @@ type RuntimeStateQuery<'w, 's> = Query<
         Option<&'static Interaction>,
         &'static UiXmlDisabled,
         Option<&'static UiXmlChecked>,
+        Option<&'static UiXmlSelected>,
+        Option<&'static UiXmlOpen>,
+        Option<&'static UiXmlValidationState>,
         &'static mut UiXmlRuntimeState,
     ),
 >;
@@ -1764,11 +1847,17 @@ fn sync_runtime_state(
     checked_lookup: Query<&UiXmlChecked>,
     mut query: RuntimeStateQuery<'_, '_>,
 ) {
-    for (entity, interaction, disabled, checked, mut state) in &mut query {
+    for (entity, interaction, disabled, checked, selected, open, validation, mut state) in
+        &mut query
+    {
         let next_disabled = disabled.0;
         let next_focused = focus.entity == Some(entity) && !next_disabled;
         let next_focus_visible = next_focused && modality.focus_visible;
         let next_checked = checked.is_some_and(|checked| checked.0) && !next_disabled;
+        let next_selected = selected.is_some_and(|selected| selected.0) && !next_disabled;
+        let next_open = open.is_some_and(|open| open.0) && !next_disabled;
+        let next_valid = validation.is_some_and(|validation| validation.valid) && !next_disabled;
+        let next_invalid = validation.is_some_and(|validation| !validation.valid) && !next_disabled;
         let next_focus_within = focus
             .entity
             .is_some_and(|focused| entity_contains_focus(entity, focused, &cache))
@@ -1793,6 +1882,10 @@ fn sync_runtime_state(
             && state.focused == next_focused
             && state.focus_visible == next_focus_visible
             && state.checked == next_checked
+            && state.selected == next_selected
+            && state.open == next_open
+            && state.valid == next_valid
+            && state.invalid == next_invalid
             && state.focus_within == next_focus_within
             && state.ancestor_checked == next_ancestor_checked
             && state.ancestor_focus_within == next_ancestor_focus_within
@@ -1806,6 +1899,10 @@ fn sync_runtime_state(
         state.focused = next_focused;
         state.focus_visible = next_focus_visible;
         state.checked = next_checked;
+        state.selected = next_selected;
+        state.open = next_open;
+        state.valid = next_valid;
+        state.invalid = next_invalid;
         state.focus_within = next_focus_within;
         state.ancestor_checked = next_ancestor_checked;
         state.ancestor_focus_within = next_ancestor_focus_within;
@@ -1883,6 +1980,7 @@ type InteractionStyleQuery<'w, 's> = Query<
         Entity,
         &'static UiXmlRuntimeState,
         &'static UiXmlStyleSource,
+        Option<&'static UiXmlTransitionState>,
         &'static mut Style,
         &'static mut BackgroundColor,
         &'static mut BorderColor,
@@ -1902,6 +2000,7 @@ fn apply_interaction_styles(
         entity,
         runtime_state,
         style_source,
+        maybe_transition,
         mut bevy_style,
         mut background,
         mut border,
@@ -1913,11 +2012,32 @@ fn apply_interaction_styles(
     {
         let resolved = style_source.resolve(*runtime_state);
         *bevy_style = to_bevy_style(&resolved);
-        background.0 = style_color(
+        let next_background = style_color(
             resolved.background.as_deref(),
             Color::NONE,
             resolved.opacity,
         );
+        if let Some(transition) = resolved.transition.as_ref().filter(|transition| {
+            matches!(
+                transition.property,
+                TransitionProperty::Background | TransitionProperty::Opacity
+            ) && transition.duration > 0.0
+        }) {
+            if maybe_transition.is_none()
+                && background.0.as_rgba_u8() != next_background.as_rgba_u8()
+            {
+                commands.entity(entity).insert(UiXmlTransitionState {
+                    property: transition.property,
+                    from: background.0,
+                    to: next_background,
+                    elapsed: 0.0,
+                    duration: transition.duration,
+                });
+            }
+        } else {
+            background.0 = next_background;
+            commands.entity(entity).remove::<UiXmlTransitionState>();
+        }
         border.0 = style_color(
             resolved.border_color.as_deref(),
             Color::NONE,
@@ -1976,6 +2096,46 @@ fn apply_interaction_styles(
             (None, None) => {}
         }
     }
+}
+
+fn update_transition_styles(
+    time: Option<Res<Time>>,
+    mut commands: Commands<'_, '_>,
+    mut query: Query<(
+        Entity,
+        &'static mut UiXmlTransitionState,
+        &'static mut BackgroundColor,
+    )>,
+) {
+    let delta = time
+        .as_deref()
+        .map(Time::delta_seconds)
+        .unwrap_or(1.0 / 60.0);
+    for (entity, mut transition, mut background) in &mut query {
+        transition.elapsed = (transition.elapsed + delta).min(transition.duration);
+        let t = if transition.duration <= f32::EPSILON {
+            1.0
+        } else {
+            transition.elapsed / transition.duration
+        };
+        background.0 = lerp_color(transition.from, transition.to, t);
+        if transition.elapsed >= transition.duration {
+            background.0 = transition.to;
+            commands.entity(entity).remove::<UiXmlTransitionState>();
+        }
+    }
+}
+
+fn lerp_color(from: Color, to: Color, t: f32) -> Color {
+    let [fr, fg, fb, fa] = from.as_rgba_f32();
+    let [tr, tg, tb, ta] = to.as_rgba_f32();
+    let t = t.clamp(0.0, 1.0);
+    Color::rgba(
+        fr + (tr - fr) * t,
+        fg + (tg - fg) * t,
+        fb + (tb - fb) * t,
+        fa + (ta - fa) * t,
+    )
 }
 
 type EffectMaterialQuery<'w, 's> = Query<

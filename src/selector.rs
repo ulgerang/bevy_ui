@@ -51,6 +51,10 @@ pub(crate) enum PseudoClass {
     Focus,
     Disabled,
     Checked,
+    Selected,
+    Open,
+    Valid,
+    Invalid,
     FocusWithin,
     FocusVisible,
 }
@@ -324,6 +328,10 @@ impl PseudoClass {
             "focus" => Some(Self::Focus),
             "disabled" => Some(Self::Disabled),
             "checked" => Some(Self::Checked),
+            "selected" => Some(Self::Selected),
+            "open" => Some(Self::Open),
+            "valid" => Some(Self::Valid),
+            "invalid" => Some(Self::Invalid),
             "focus-within" => Some(Self::FocusWithin),
             "focus-visible" => Some(Self::FocusVisible),
             _ => None,
@@ -347,6 +355,10 @@ impl PseudoClass {
             | Self::Active
             | Self::Focus
             | Self::Checked
+            | Self::Selected
+            | Self::Open
+            | Self::Valid
+            | Self::Invalid
             | Self::FocusWithin
             | Self::FocusVisible => false,
         }

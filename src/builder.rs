@@ -6,9 +6,9 @@ use crate::runtime::{
     apply_text_presentation, RuntimeStyleInputs, UiXmlChecked, UiXmlControlKind, UiXmlControlName,
     UiXmlControlScope, UiXmlControlValue, UiXmlDisabled, UiXmlDocumentOrder, UiXmlElement,
     UiXmlFocusable, UiXmlForm, UiXmlImePreedit, UiXmlInitialChecked, UiXmlInitialTextValue,
-    UiXmlRequired, UiXmlRuntimeState, UiXmlSelectorContext, UiXmlStateStyles, UiXmlStyleSource,
-    UiXmlTextCursor, UiXmlTextDisplay, UiXmlTextInput, UiXmlTextPlaceholder, UiXmlTextSelection,
-    UiXmlTextValue, UiXmlValidationState,
+    UiXmlOpen, UiXmlRequired, UiXmlRuntimeState, UiXmlSelected, UiXmlSelectorContext,
+    UiXmlStateStyles, UiXmlStyleSource, UiXmlTextCursor, UiXmlTextDisplay, UiXmlTextInput,
+    UiXmlTextPlaceholder, UiXmlTextSelection, UiXmlTextValue, UiXmlValidationState,
 };
 use crate::selector::PseudoClass;
 use crate::style::{style_color, to_bevy_style, StyleSheet, UiStyle, VisibilityValue};
@@ -122,6 +122,18 @@ fn spawn_node<'a>(
     let checked_style = resources
         .stylesheet
         .runtime_state_style_for_path(&path, PseudoClass::Checked);
+    let selected_style = resources
+        .stylesheet
+        .runtime_state_style_for_path(&path, PseudoClass::Selected);
+    let open_style = resources
+        .stylesheet
+        .runtime_state_style_for_path(&path, PseudoClass::Open);
+    let valid_style = resources
+        .stylesheet
+        .runtime_state_style_for_path(&path, PseudoClass::Valid);
+    let invalid_style = resources
+        .stylesheet
+        .runtime_state_style_for_path(&path, PseudoClass::Invalid);
     let focus_within_style = resources
         .stylesheet
         .runtime_state_style_for_path(&path, PseudoClass::FocusWithin);
@@ -148,6 +160,10 @@ fn spawn_node<'a>(
         active: &active_style,
         focus: &focus_style,
         checked: &checked_style,
+        selected: &selected_style,
+        open: &open_style,
+        valid: &valid_style,
+        invalid: &invalid_style,
         focus_within: &focus_within_style,
         focus_visible: &focus_visible_style,
         ancestor_checked: &ancestor_checked_style,
@@ -461,6 +477,12 @@ fn attach_widget_metadata(
             valid: true,
             reason: None,
         });
+    }
+    if node.attr("selected").is_some() {
+        commands.entity(entity).insert(UiXmlSelected(true));
+    }
+    if node.attr("open").is_some() {
+        commands.entity(entity).insert(UiXmlOpen(true));
     }
 
     let Some(kind) = control_kind(node) else {
