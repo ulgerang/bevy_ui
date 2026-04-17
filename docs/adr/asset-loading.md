@@ -1,21 +1,49 @@
 # ADR: Asset Loading Boundary
 
-Status: Accepted for Stage 9 checkpoint.
+Status: Accepted for asset loading and hot reload slice.
 
 ## Decision
 
-The crate remains string-first for XML and JSON styles. Image `src` and default font paths are handed to Bevy `AssetServer`; asset identity, loading state, failures, hot reload, and dependency tracking are Bevy-owned.
+The crate keeps the existing string-first APIs and adds bounded Bevy AssetServer
+integration for game iteration workflows.
 
-No custom `AssetLoader`, document handles, hot reload support, async loading, or asset dependency graph is introduced in this stage.
+Supported now:
+
+- `UiXmlLayoutAsset` for parsed XML layout documents.
+- `UiXmlStyleAsset` for parsed JSON/native CSS style assets.
+- `UiXmlLayoutAssetLoader` and `UiXmlStyleAssetLoader` registered by the opt-in
+  `UiXmlAssetPlugin`.
+- `UiXmlAssetDocument` for asset-backed UI roots using layout/style handles.
+- Asset-backed roots spawn when both handles are loaded and rebuild their child
+  UI when matching layout/style assets are added, modified, or fully loaded.
+- `UiXmlStyleRuntime.generation` increments on style asset events and active
+  `UiXmlThemeTokens` changes.
+- `UiXmlAssetDiagnostic` carries source path plus diagnostic message.
+
+`UiXmlPlugin` remains headless-safe. Projects that want AssetServer loading add
+`AssetPlugin` plus `UiXmlAssetPlugin`.
 
 ## Drivers
 
-- The current public API loads layout/style strings.
-- Bevy already owns image/font asset handles.
-- AssetLoader support would introduce document identity and reload semantics that deserve a separate design.
+- Game UI iteration benefits from editing XML/CSS assets instead of recompiling
+  string constants.
+- Bevy already owns asset identity, loading state, handles, and hot reload
+  events.
+- Existing string APIs are useful for tests and embedded UI definitions and must
+  remain stable.
+
+## Alternatives Considered
+
+- String-only forever: rejected because it slows game iteration.
+- Full document dependency graph/import system: rejected as too broad for this
+  slice.
+- Register asset loaders in `UiXmlPlugin`: rejected because headless/minimal apps
+  may not have AssetServer resources.
 
 ## Consequences
 
-- Examples may show asset paths for images/fonts, but the crate does not claim asset lifecycle management.
-- Missing/invalid assets are handled according to Bevy `AssetServer` behavior.
-- Future Bevy asset integration requires a separate ADR.
+- Asset workflow is opt-in through `UiXmlAssetPlugin`.
+- Style reload uses generation/rebuild semantics rather than full incremental
+  CSSOM diffing.
+- Layout reload currently rebuilds the asset-backed root's child UI.
+- CSS imports and complex dependency tracking remain deferred.

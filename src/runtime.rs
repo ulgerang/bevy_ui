@@ -642,6 +642,7 @@ impl Plugin for UiXmlPlugin {
                 Update,
                 (
                     register_selector_contexts,
+                    mark_theme_runtime_generation,
                     mark_style_runtime_generation,
                     normalize_initial_radio_groups,
                     focus_pressed_focusables,
@@ -1822,6 +1823,15 @@ fn mark_style_runtime_generation(
 
     for mut state in &mut query {
         state.style_generation = runtime.generation;
+    }
+}
+
+fn mark_theme_runtime_generation(
+    theme: Res<UiXmlThemeTokens>,
+    mut runtime: ResMut<UiXmlStyleRuntime>,
+) {
+    if theme.is_changed() && !theme.tokens.is_empty() {
+        runtime.generation += 1;
     }
 }
 

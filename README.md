@@ -245,6 +245,15 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
 }
 ```
 
+
+Asset-backed UI loading:
+
+- `UiXmlAssetPlugin` registers XML and CSS/style asset loaders without changing the string-first API.
+- `UiXmlLayoutAsset` stores parsed XML documents and source-path diagnostics.
+- `UiXmlStyleAsset` stores parsed stylesheets and path-aware diagnostics.
+- `UiXmlAssetDocument` can spawn from layout/style handles once both assets are loaded.
+- Matching asset reload events rebuild asset-backed child UI and bump style generation.
+
 ## Design Notes
 
 - XML is parsed with `roxmltree`; current syntax is intentionally XML-valid
@@ -255,8 +264,12 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
 - Text uses Bevy's embedded default ASCII font by default. Call
   `with_default_font("path/in/assets.ttf")` when a project needs a specific
   font or non-ASCII glyph coverage.
-- Image `src` and default font paths are handed to Bevy `AssetServer`; this
-  crate does not provide a custom `AssetLoader` or hot reload contract.
+- Image `src` and default font paths are handed to Bevy `AssetServer`. For
+  XML/style document loading, add `UiXmlAssetPlugin` alongside Bevy
+  `AssetPlugin` and use `UiXmlLayoutAsset`, `UiXmlStyleAsset`, and
+  `UiXmlAssetDocument`/`spawn_asset_document`. Style asset events and
+  `UiXmlThemeTokens` changes bump `UiXmlStyleRuntime.generation`; asset-backed
+  roots rebuild their child UI on matching layout/style reloads.
 - Bevy dependency is pinned to `0.13.2` for the current compatibility target.
 
 ### Optional effect material renderer

@@ -6,6 +6,7 @@
 
 use thiserror::Error;
 
+mod assets;
 mod builder;
 mod effect_material;
 mod parser;
@@ -14,6 +15,11 @@ mod runtime;
 mod selector;
 mod style;
 
+pub use assets::{
+    spawn_asset_document, UiXmlAssetDiagnostic, UiXmlAssetDocument, UiXmlAssetLoadError,
+    UiXmlAssetPlugin, UiXmlLayoutAsset, UiXmlLayoutAssetLoader, UiXmlStyleAsset,
+    UiXmlStyleAssetLoader,
+};
 pub use builder::{spawn_document, spawn_document_with_embedded_font, UiXmlBuilder};
 pub use effect_material::{UiXmlEffectMaterial, UiXmlEffectMaterialPlugin};
 pub use parser::{parse_layout, ElementNode, UiDocument};
@@ -58,6 +64,7 @@ mod tests {
     use crate::runtime::RuntimeStyleInputs;
     use crate::selector::{Combinator, PseudoClass, Selector};
     use crate::style::{parse_color, to_bevy_style};
+    use bevy::asset::AssetEvent;
     use bevy::input::gamepad::{
         Gamepad, GamepadAxisChangedEvent, GamepadAxisType, GamepadButton, GamepadButtonInput,
         GamepadButtonType,
@@ -2632,5 +2639,180 @@ mod tests {
         assert_eq!(title.attr("content"), Some("Hello"));
         assert_eq!(avatar.widget_type(), "image");
         assert_eq!(avatar.attr("src"), Some("textures/avatar.png"));
+    }
+
+    #[test]
+    fn asset_backed_document_spawns_and_reloads_from_handles() {
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::asset::AssetPlugin::default(),
+            UiXmlPlugin,
+            UiXmlAssetPlugin,
+        ));
+
+        let layout = UiXmlLayoutAsset {
+            document: parse_layout(r#"<ui id="root"><button id="start">Start</button></ui>"#)
+                .unwrap(),
+            source_path: "ui/menu.xml".to_string(),
+            diagnostics: Vec::new(),
+        };
+        let style = UiXmlStyleAsset {
+            stylesheet: StyleSheet::parse(r##"#start { background: black; }"##).unwrap(),
+            source_path: "ui/menu.css".to_string(),
+            diagnostics: Vec::new(),
+        };
+        let layout_handle = app
+            .world
+            .resource_mut::<Assets<UiXmlLayoutAsset>>()
+            .add(layout);
+        let style_handle = app
+            .world
+            .resource_mut::<Assets<UiXmlStyleAsset>>()
+            .add(style);
+        let holder = app
+            .world
+            .spawn(UiXmlAssetDocument::new(
+                layout_handle.clone(),
+                style_handle.clone(),
+            ))
+            .id();
+
+        app.update();
+        let start = entity_by_id(&mut app, "start");
+        assert_eq!(
+            app.world
+                .entity(start)
+                .get::<BackgroundColor>()
+                .unwrap()
+                .0
+                .as_rgba_u8(),
+            [0, 0, 0, 255]
+        );
+        assert!(app
+            .world
+            .entity(holder)
+            .get::<UiXmlAssetDocument>()
+            .unwrap()
+            .spawned_root
+            .is_some());
+
+        app.world.resource_mut::<Assets<UiXmlStyleAsset>>().insert(
+            &style_handle,
+            UiXmlStyleAsset {
+                stylesheet: StyleSheet::parse(r##"#start { background: white; }"##).unwrap(),
+                source_path: "ui/menu.css".to_string(),
+                diagnostics: Vec::new(),
+            },
+        );
+        app.world
+            .resource_mut::<Events<AssetEvent<UiXmlStyleAsset>>>()
+            .send(AssetEvent::Modified {
+                id: style_handle.id(),
+            });
+        app.update();
+        let reloaded_start = entity_by_id(&mut app, "start");
+        assert_eq!(
+            app.world
+                .entity(reloaded_start)
+                .get::<BackgroundColor>()
+                .unwrap()
+                .0
+                .as_rgba_u8(),
+            [255, 255, 255, 255]
+        );
+        assert!(app.world.resource::<UiXmlStyleRuntime>().generation > 0);
+    }
+
+    #[test]
+    fn asset_server_loads_xml_and_css_assets_with_registered_loaders() {
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::asset::AssetPlugin::default(),
+            UiXmlPlugin,
+            UiXmlAssetPlugin,
+        ));
+
+        let asset_server = app.world.resource::<AssetServer>().clone();
+        let layout: Handle<UiXmlLayoutAsset> = asset_server.load("uixml_test_menu.xml");
+        let style: Handle<UiXmlStyleAsset> = asset_server.load("uixml_test_menu.css");
+        app.world
+            .spawn(UiXmlAssetDocument::new(layout.clone(), style.clone()));
+
+        for _ in 0..30 {
+            app.update();
+            if app
+                .world
+                .resource::<Assets<UiXmlLayoutAsset>>()
+                .get(&layout)
+                .is_some()
+                && app
+                    .world
+                    .resource::<Assets<UiXmlStyleAsset>>()
+                    .get(&style)
+                    .is_some()
+            {
+                break;
+            }
+        }
+
+        assert!(app
+            .world
+            .resource::<Assets<UiXmlLayoutAsset>>()
+            .get(&layout)
+            .is_some());
+        assert!(app
+            .world
+            .resource::<Assets<UiXmlStyleAsset>>()
+            .get(&style)
+            .is_some());
+
+        for _ in 0..5 {
+            app.update();
+        }
+        let start = entity_by_id(&mut app, "asset-start");
+        assert_eq!(
+            app.world
+                .entity(start)
+                .get::<BackgroundColor>()
+                .unwrap()
+                .0
+                .as_rgba_u8(),
+            [255, 99, 71, 255]
+        );
+    }
+
+    #[test]
+    fn asset_diagnostics_keep_source_paths_and_theme_changes_bump_generation() {
+        let stylesheet =
+            StyleSheet::parse(r##"button { color: var(--missing); boxShadow: 0 0 4px black; }"##)
+                .unwrap();
+        let asset = UiXmlStyleAsset {
+            diagnostics: stylesheet
+                .diagnostics
+                .iter()
+                .map(|diagnostic| UiXmlAssetDiagnostic {
+                    path: "ui/bad.css".to_string(),
+                    message: format!("{diagnostic:?}"),
+                })
+                .collect(),
+            stylesheet,
+            source_path: "ui/bad.css".to_string(),
+        };
+        assert!(asset
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.path == "ui/bad.css"));
+        assert!(!asset.diagnostics.is_empty());
+
+        let mut app = App::new();
+        app.add_plugins(UiXmlPlugin);
+        app.world.resource_mut::<UiXmlThemeTokens>().tokens.insert(
+            "--accent".to_string(),
+            serde_json::Value::String("gold".to_string()),
+        );
+        app.update();
+        assert!(app.world.resource::<UiXmlStyleRuntime>().generation > 0);
     }
 }
