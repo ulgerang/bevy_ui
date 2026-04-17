@@ -4,12 +4,29 @@
 //! project: load a layout string, load a style sheet string, then spawn a UI
 //! tree into Bevy.
 
-use bevy::prelude::*;
-use bevy::text::BreakLineOn;
-use roxmltree::Document;
-use serde::Deserialize;
-use std::collections::HashMap;
 use thiserror::Error;
+
+mod builder;
+mod parser;
+mod render_effects;
+mod runtime;
+mod selector;
+mod style;
+
+pub use builder::{spawn_document, spawn_document_with_embedded_font, UiXmlBuilder};
+pub use parser::{parse_layout, ElementNode, UiDocument};
+pub use render_effects::{UiXmlUnsupportedEffects, UnsupportedEffect};
+pub use runtime::{
+    UiXmlChecked, UiXmlControlChanged, UiXmlControlKind, UiXmlControlName, UiXmlControlScope,
+    UiXmlControlValue, UiXmlDisabled, UiXmlDocumentOrder, UiXmlElement, UiXmlFocus, UiXmlForm,
+    UiXmlPlugin, UiXmlRuntimeState, UiXmlSelectorContext, UiXmlSelectorContextCache,
+    UiXmlSelectorSnapshot, UiXmlStateStyles, UiXmlStyleRuntime, UiXmlStyleSource,
+};
+pub use style::{
+    AlignSelfValue, AlignValue, DisplayValue, EdgeSizes, FlexDirectionValue, FlexWrapValue,
+    JustifyValue, Length, OutlineStyle, OverflowValue, PositionValue, StyleDiagnostic, StyleSheet,
+    TextAlignValue, TextWrapValue, UiStyle, VisibilityValue,
+};
 
 #[derive(Debug, Error)]
 pub enum BevyUiXmlError {
@@ -21,1963 +38,13 @@ pub enum BevyUiXmlError {
     EmptyLayout,
 }
 
-#[derive(Component, Debug, Clone, PartialEq, Eq)]
-pub struct UiXmlElement {
-    pub tag: String,
-    pub widget_type: String,
-    pub id: Option<String>,
-    pub classes: Vec<String>,
-    pub attributes: HashMap<String, String>,
-}
-
-impl From<&ElementNode> for UiXmlElement {
-    fn from(node: &ElementNode) -> Self {
-        Self {
-            tag: node.tag.clone(),
-            widget_type: node.widget_type().to_string(),
-            id: node.id.clone(),
-            classes: node.classes.clone(),
-            attributes: node.attributes.clone(),
-        }
-    }
-}
-
-#[derive(Component, Debug, Clone)]
-pub struct UiXmlStateStyles {
-    base: UiStyle,
-    hover: Option<UiStyle>,
-    active: Option<UiStyle>,
-    disabled: Option<UiStyle>,
-}
-
-impl UiXmlStateStyles {
-    fn from_style(style: &UiStyle) -> Self {
-        Self {
-            base: style.without_state_styles(),
-            hover: style.hover.as_deref().map(UiStyle::without_state_styles),
-            active: style.active.as_deref().map(UiStyle::without_state_styles),
-            disabled: style.disabled.as_deref().map(UiStyle::without_state_styles),
-        }
-    }
-
-    fn resolve(&self, interaction: Interaction, disabled: bool) -> UiStyle {
-        let mut style = self.base.clone();
-        if disabled {
-            if let Some(disabled) = &self.disabled {
-                style.merge(disabled);
-            }
-            return style;
-        }
-
-        match interaction {
-            Interaction::Pressed => {
-                if let Some(active) = &self.active {
-                    style.merge(active);
-                }
-            }
-            Interaction::Hovered => {
-                if let Some(hover) = &self.hover {
-                    style.merge(hover);
-                }
-            }
-            Interaction::None => {}
-        }
-
-        style
-    }
-}
-
-#[derive(Component, Debug, Clone, PartialEq)]
-pub struct UiXmlUnsupportedEffects {
-    pub effects: Vec<UnsupportedEffect>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UnsupportedEffect {
-    BorderRadius(String),
-    BoxShadow(String),
-    Filter(String),
-    BackdropFilter(String),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct UiDocument {
-    pub root: ElementNode,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ElementNode {
-    pub tag: String,
-    pub id: Option<String>,
-    pub classes: Vec<String>,
-    pub text: String,
-    pub attributes: HashMap<String, String>,
-    pub children: Vec<ElementNode>,
-}
-
-impl ElementNode {
-    pub fn attr(&self, name: &str) -> Option<&str> {
-        self.attributes.get(name).map(String::as_str)
-    }
-
-    pub fn widget_type(&self) -> &str {
-        canonical_tag(&self.tag)
-    }
-}
-
-fn canonical_tag(tag: &str) -> &str {
-    match tag {
-        "ui" | "panel" | "div" | "container" => "panel",
-        "button" | "btn" => "button",
-        "text" | "label" | "span" | "p" => "text",
-        "image" | "img" => "image",
-        _ => tag,
-    }
-}
-
-pub fn parse_layout(input: &str) -> Result<UiDocument, BevyUiXmlError> {
-    let xml = Document::parse(input)?;
-    let root = xml
-        .root()
-        .children()
-        .find(|node| node.is_element())
-        .ok_or(BevyUiXmlError::EmptyLayout)?;
-
-    Ok(UiDocument {
-        root: parse_element(root),
-    })
-}
-
-fn parse_element(node: roxmltree::Node<'_, '_>) -> ElementNode {
-    let mut attributes = HashMap::new();
-    let mut id = None;
-    let mut classes = Vec::new();
-
-    for attr in node.attributes() {
-        match attr.name() {
-            "id" => id = Some(attr.value().to_string()),
-            "class" => {
-                classes = attr
-                    .value()
-                    .split_whitespace()
-                    .map(ToOwned::to_owned)
-                    .collect();
-            }
-            name => {
-                attributes.insert(name.to_string(), attr.value().to_string());
-            }
-        }
-    }
-
-    let children = node
-        .children()
-        .filter(|child| child.is_element())
-        .map(parse_element)
-        .collect();
-
-    let text = node
-        .children()
-        .filter(|child| child.is_text())
-        .filter_map(|child| child.text())
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    ElementNode {
-        tag: node.tag_name().name().to_ascii_lowercase(),
-        id,
-        classes,
-        text,
-        attributes,
-        children,
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct StyleSheet {
-    pub styles: HashMap<String, UiStyle>,
-    pub diagnostics: Vec<StyleDiagnostic>,
-    rules: Vec<StyleRule>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StyleDiagnostic {
-    UnsupportedProperty {
-        selector: String,
-        property: String,
-    },
-    UnsupportedEffect {
-        selector: String,
-        property: String,
-        reason: String,
-    },
-    InvalidSelector {
-        selector: String,
-        reason: String,
-    },
-}
-
-#[derive(Debug, Clone)]
-struct StyleRule {
-    selector: Selector,
-    style: UiStyle,
-    specificity: u32,
-    order: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Selector {
-    parts: Vec<SelectorPart>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Combinator {
-    Descendant,
-    Child,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SelectorPart {
-    combinator: Option<Combinator>,
-    simple: SimpleSelector,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-struct SimpleSelector {
-    tag: Option<String>,
-    id: Option<String>,
-    classes: Vec<String>,
-    attributes: Vec<AttributeSelector>,
-    pseudo: Option<PseudoClass>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AttributeSelector {
-    name: String,
-    value: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PseudoClass {
-    Hover,
-    Active,
-    Focus,
-    Disabled,
-}
-
-impl Selector {
-    fn parse(input: &str) -> Option<Self> {
-        let parts = split_selector(input)
-            .into_iter()
-            .map(|(combinator, token)| {
-                SimpleSelector::parse(&token).map(|simple| SelectorPart { combinator, simple })
-            })
-            .collect::<Option<Vec<_>>>()?;
-
-        if parts.is_empty() {
-            None
-        } else {
-            Some(Self { parts })
-        }
-    }
-
-    fn specificity(&self) -> u32 {
-        self.parts
-            .iter()
-            .map(|part| part.simple.specificity())
-            .sum()
-    }
-
-    fn matches(&self, path: &[&ElementNode]) -> Option<u32> {
-        if path.is_empty() {
-            return None;
-        }
-
-        let mut path_index = path.len() - 1;
-        let mut bonus = self.parts.last()?.simple.matches(path[path_index])?;
-
-        for part_index in (0..self.parts.len().saturating_sub(1)).rev() {
-            match self.parts[part_index + 1]
-                .combinator
-                .unwrap_or(Combinator::Descendant)
-            {
-                Combinator::Child => {
-                    if path_index == 0 {
-                        return None;
-                    }
-                    path_index -= 1;
-                    bonus += self.parts[part_index].simple.matches(path[path_index])?;
-                }
-                Combinator::Descendant => {
-                    let mut matched = None;
-                    for ancestor_index in (0..path_index).rev() {
-                        if let Some(part_bonus) =
-                            self.parts[part_index].simple.matches(path[ancestor_index])
-                        {
-                            matched = Some((ancestor_index, part_bonus));
-                            break;
-                        }
-                    }
-                    let (ancestor_index, part_bonus) = matched?;
-                    path_index = ancestor_index;
-                    bonus += part_bonus;
-                }
-            }
-        }
-
-        Some(bonus)
-    }
-}
-
-impl SimpleSelector {
-    fn parse(input: &str) -> Option<Self> {
-        let mut selector = Self::default();
-        let chars = input.trim().chars().collect::<Vec<_>>();
-        if chars.is_empty() {
-            return None;
-        }
-
-        let mut index = 0;
-        if is_ident_start(chars[index]) || chars[index] == '*' {
-            let start = index;
-            index += 1;
-            while index < chars.len() && is_ident_continue(chars[index]) {
-                index += 1;
-            }
-            if chars[start] != '*' {
-                selector.tag = Some(
-                    chars[start..index]
-                        .iter()
-                        .collect::<String>()
-                        .to_ascii_lowercase(),
-                );
-            }
-        }
-
-        while index < chars.len() {
-            match chars[index] {
-                '#' => {
-                    index += 1;
-                    let (value, next) = parse_ident(&chars, index)?;
-                    selector.id = Some(value);
-                    index = next;
-                }
-                '.' => {
-                    index += 1;
-                    let (value, next) = parse_ident(&chars, index)?;
-                    selector.classes.push(value);
-                    index = next;
-                }
-                '[' => {
-                    let (attribute, next) = parse_attribute_selector(&chars, index)?;
-                    selector.attributes.push(attribute);
-                    index = next;
-                }
-                ':' => {
-                    index += 1;
-                    let (value, next) = parse_ident(&chars, index)?;
-                    selector.pseudo = PseudoClass::parse(&value);
-                    selector.pseudo?;
-                    index = next;
-                }
-                _ => return None,
-            }
-        }
-
-        Some(selector)
-    }
-
-    fn specificity(&self) -> u32 {
-        let mut score = 0;
-        if self.id.is_some() {
-            score += 100;
-        }
-        score += (self.classes.len() + self.attributes.len()) as u32 * 10;
-        if self.pseudo.is_some() {
-            score += 10;
-        }
-        if self.tag.is_some() {
-            score += 1;
-        }
-        score
-    }
-
-    fn matches(&self, node: &ElementNode) -> Option<u32> {
-        let mut bonus = 0;
-
-        if let Some(tag) = &self.tag {
-            if tag == &node.tag {
-                if node.widget_type() != node.tag {
-                    bonus += 1;
-                }
-            } else if tag != node.widget_type() {
-                return None;
-            }
-        }
-
-        if let Some(id) = &self.id {
-            if node.id.as_deref() != Some(id.as_str()) {
-                return None;
-            }
-        }
-
-        for class_name in &self.classes {
-            if !node.classes.iter().any(|candidate| candidate == class_name) {
-                return None;
-            }
-        }
-
-        for attr in &self.attributes {
-            let value = node.attr(&attr.name)?;
-            if let Some(expected) = &attr.value {
-                if value != expected {
-                    return None;
-                }
-            }
-        }
-
-        if let Some(pseudo) = self.pseudo {
-            if !pseudo.matches_static(node) {
-                return None;
-            }
-        }
-
-        Some(bonus)
-    }
-}
-
-impl PseudoClass {
-    fn parse(input: &str) -> Option<Self> {
-        match input {
-            "hover" => Some(Self::Hover),
-            "active" => Some(Self::Active),
-            "focus" => Some(Self::Focus),
-            "disabled" => Some(Self::Disabled),
-            _ => None,
-        }
-    }
-
-    fn matches_static(self, node: &ElementNode) -> bool {
-        match self {
-            Self::Disabled => node.attr("disabled").is_some(),
-            Self::Hover | Self::Active | Self::Focus => false,
-        }
-    }
-}
-
-fn split_selector(input: &str) -> Vec<(Option<Combinator>, String)> {
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    let mut depth = 0usize;
-    let mut pending = None;
-
-    for ch in input.trim().chars() {
-        match ch {
-            '[' => {
-                depth += 1;
-                current.push(ch);
-            }
-            ']' => {
-                depth = depth.saturating_sub(1);
-                current.push(ch);
-            }
-            '>' if depth == 0 => {
-                push_selector_part(&mut parts, &mut current, pending.take());
-                pending = Some(Combinator::Child);
-            }
-            ch if ch.is_whitespace() && depth == 0 => {
-                if current.trim().is_empty() {
-                    if !parts.is_empty() && pending.is_none() {
-                        pending = Some(Combinator::Descendant);
-                    }
-                } else {
-                    push_selector_part(&mut parts, &mut current, pending.take());
-                    if !parts.is_empty() && pending.is_none() {
-                        pending = Some(Combinator::Descendant);
-                    }
-                }
-            }
-            _ => current.push(ch),
-        }
-    }
-
-    push_selector_part(&mut parts, &mut current, pending);
-    if let Some(first) = parts.first_mut() {
-        first.0 = None;
-    }
-    parts
-}
-
-fn push_selector_part(
-    parts: &mut Vec<(Option<Combinator>, String)>,
-    current: &mut String,
-    combinator: Option<Combinator>,
-) {
-    let token = current.trim();
-    if !token.is_empty() {
-        parts.push((combinator, token.to_string()));
-    }
-    current.clear();
-}
-
-fn parse_ident(chars: &[char], start: usize) -> Option<(String, usize)> {
-    if start >= chars.len() || !is_ident_start(chars[start]) {
-        return None;
-    }
-
-    let mut index = start + 1;
-    while index < chars.len() && is_ident_continue(chars[index]) {
-        index += 1;
-    }
-
-    Some((chars[start..index].iter().collect(), index))
-}
-
-fn parse_attribute_selector(chars: &[char], start: usize) -> Option<(AttributeSelector, usize)> {
-    let mut index = start + 1;
-    let mut raw = String::new();
-    while index < chars.len() && chars[index] != ']' {
-        raw.push(chars[index]);
-        index += 1;
-    }
-    if index >= chars.len() {
-        return None;
-    }
-
-    let (name, value) = if let Some((name, value)) = raw.split_once('=') {
-        (
-            name.trim().to_string(),
-            Some(
-                value
-                    .trim()
-                    .trim_matches('"')
-                    .trim_matches('\'')
-                    .to_string(),
-            ),
-        )
-    } else {
-        (raw.trim().to_string(), None)
-    };
-
-    if name.is_empty() {
-        return None;
-    }
-
-    Some((AttributeSelector { name, value }, index + 1))
-}
-
-fn is_ident_start(ch: char) -> bool {
-    ch.is_ascii_alphabetic() || ch == '_' || ch == '-'
-}
-
-fn is_ident_continue(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'
-}
-
-fn normalize_style_value(value: &serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Object(object) => serde_json::Value::Object(
-            object
-                .iter()
-                .map(|(key, value)| {
-                    (
-                        canonical_property_name(key).unwrap_or(key).to_string(),
-                        normalize_style_value(value),
-                    )
-                })
-                .collect(),
-        ),
-        serde_json::Value::Array(values) => {
-            serde_json::Value::Array(values.iter().map(normalize_style_value).collect())
-        }
-        value => value.clone(),
-    }
-}
-
-fn collect_style_diagnostics(
-    selector: &str,
-    value: &serde_json::Value,
-    diagnostics: &mut Vec<StyleDiagnostic>,
-) {
-    let Some(object) = value.as_object() else {
-        return;
-    };
-
-    for (property, nested) in object {
-        if let Some(state) = matches_state_property(property) {
-            collect_style_diagnostics(selector, nested, diagnostics);
-            if canonical_property_name(state).is_none() {
-                diagnostics.push(StyleDiagnostic::UnsupportedProperty {
-                    selector: selector.to_string(),
-                    property: property.clone(),
-                });
-            }
-            continue;
-        }
-
-        if let Some(reason) = unsupported_effect_reason(property) {
-            diagnostics.push(StyleDiagnostic::UnsupportedEffect {
-                selector: selector.to_string(),
-                property: property.clone(),
-                reason: reason.to_string(),
-            });
-            continue;
-        }
-
-        if canonical_property_name(property).is_none() {
-            diagnostics.push(StyleDiagnostic::UnsupportedProperty {
-                selector: selector.to_string(),
-                property: property.clone(),
-            });
-        }
-    }
-}
-
-fn unsupported_effect_reason(property: &str) -> Option<&'static str> {
-    match property {
-        "borderRadius" | "border-radius" => {
-            Some("Bevy UI 0.12 has no native rounded rectangle clipping")
-        }
-        "boxShadow" | "box-shadow" => {
-            Some("box shadows need a custom UI material or extra shadow geometry")
-        }
-        "filter" => Some("filters need a custom UI material shader"),
-        "backdropFilter" | "backdrop-filter" => {
-            Some("backdrop filters need a custom render pass/material")
-        }
-        _ => None,
-    }
-}
-
-fn matches_state_property(property: &str) -> Option<&str> {
-    match property {
-        "hover" | "active" | "focus" | "disabled" => Some(property),
-        _ => None,
-    }
-}
-
-fn canonical_property_name(property: &str) -> Option<&'static str> {
-    match property {
-        "width" => Some("width"),
-        "height" => Some("height"),
-        "minWidth" | "min-width" => Some("minWidth"),
-        "minHeight" | "min-height" => Some("minHeight"),
-        "maxWidth" | "max-width" => Some("maxWidth"),
-        "maxHeight" | "max-height" => Some("maxHeight"),
-        "padding" => Some("padding"),
-        "margin" => Some("margin"),
-        "border" => Some("border"),
-        "borderWidth" | "border-width" => Some("borderWidth"),
-        "borderColor" | "border-color" => Some("borderColor"),
-        "position" => Some("position"),
-        "left" => Some("left"),
-        "right" => Some("right"),
-        "top" => Some("top"),
-        "bottom" => Some("bottom"),
-        "overflow" => Some("overflow"),
-        "aspectRatio" | "aspect-ratio" => Some("aspectRatio"),
-        "direction" => Some("direction"),
-        "flexDirection" | "flex-direction" => Some("flexDirection"),
-        "flexWrap" | "flex-wrap" => Some("flexWrap"),
-        "justify" => Some("justify"),
-        "justifyContent" | "justify-content" => Some("justifyContent"),
-        "align" => Some("align"),
-        "alignItems" | "align-items" => Some("alignItems"),
-        "alignSelf" | "align-self" => Some("alignSelf"),
-        "gap" => Some("gap"),
-        "rowGap" | "row-gap" => Some("rowGap"),
-        "columnGap" | "column-gap" => Some("columnGap"),
-        "flexGrow" | "flex-grow" => Some("flexGrow"),
-        "flexShrink" | "flex-shrink" => Some("flexShrink"),
-        "flexBasis" | "flex-basis" => Some("flexBasis"),
-        "background" | "backgroundColor" | "background-color" => Some("background"),
-        "color" => Some("color"),
-        "fontSize" | "font-size" => Some("fontSize"),
-        "opacity" => Some("opacity"),
-        "outline" => Some("outline"),
-        "outlineWidth" | "outline-width" => Some("outlineWidth"),
-        "outlineColor" | "outline-color" => Some("outlineColor"),
-        "outlineOffset" | "outline-offset" => Some("outlineOffset"),
-        "zIndex" | "z-index" => Some("zIndex"),
-        "visibility" => Some("visibility"),
-        "textAlign" | "text-align" => Some("textAlign"),
-        "textWrap" | "text-wrap" => Some("textWrap"),
-        "display" => Some("display"),
-        "borderRadius" | "border-radius" => Some("borderRadius"),
-        "boxShadow" | "box-shadow" => Some("boxShadow"),
-        "filter" => Some("filter"),
-        "backdropFilter" | "backdrop-filter" => Some("backdropFilter"),
-        "hover" => Some("hover"),
-        "active" => Some("active"),
-        "focus" => Some("focus"),
-        "disabled" => Some("disabled"),
-        _ => None,
-    }
-}
-
-impl StyleSheet {
-    pub fn parse(input: &str) -> Result<Self, BevyUiXmlError> {
-        let value: serde_json::Value = serde_json::from_str(input)?;
-
-        let styles_value = value.get("styles").unwrap_or(&value);
-        let Some(styles_object) = styles_value.as_object() else {
-            return Ok(Self::default());
-        };
-
-        let mut styles = HashMap::new();
-        let mut diagnostics = Vec::new();
-        let mut rules = Vec::new();
-
-        for (order, (selector, style_value)) in styles_object.iter().enumerate() {
-            collect_style_diagnostics(selector, style_value, &mut diagnostics);
-            let style: UiStyle = serde_json::from_value(normalize_style_value(style_value))?;
-            styles.insert(selector.clone(), style.clone());
-
-            match Selector::parse(selector) {
-                Some(selector) => rules.push(StyleRule {
-                    specificity: selector.specificity(),
-                    order,
-                    selector,
-                    style,
-                }),
-                None => diagnostics.push(StyleDiagnostic::InvalidSelector {
-                    selector: selector.clone(),
-                    reason: "empty selector".to_string(),
-                }),
-            }
-        }
-
-        Ok(Self {
-            styles,
-            diagnostics,
-            rules,
-        })
-    }
-
-    pub fn computed_style(&self, node: &ElementNode) -> UiStyle {
-        self.computed_style_for_path(&[node])
-    }
-
-    pub fn computed_style_for_path(&self, path: &[&ElementNode]) -> UiStyle {
-        if self.rules.is_empty() {
-            self.legacy_computed_style(path.last().copied())
-        } else {
-            self.rule_computed_style(path)
-        }
-    }
-
-    fn legacy_computed_style(&self, node: Option<&ElementNode>) -> UiStyle {
-        let Some(node) = node else {
-            return UiStyle::default();
-        };
-        let mut style = UiStyle::default();
-        let widget_type = node.widget_type();
-
-        if let Some(tag_style) = self.styles.get(widget_type) {
-            style.merge(tag_style);
-        }
-
-        if widget_type != node.tag {
-            if let Some(tag_style) = self.styles.get(&node.tag) {
-                style.merge(tag_style);
-            }
-        }
-
-        for class_name in &node.classes {
-            if let Some(class_style) = self.styles.get(&format!(".{class_name}")) {
-                style.merge(class_style);
-            }
-        }
-
-        if let Some(id) = &node.id {
-            if let Some(id_style) = self.styles.get(&format!("#{id}")) {
-                style.merge(id_style);
-            }
-        }
-
-        style.apply_inline_attributes(node);
-        style
-    }
-
-    fn rule_computed_style(&self, path: &[&ElementNode]) -> UiStyle {
-        let Some(node) = path.last().copied() else {
-            return UiStyle::default();
-        };
-
-        let mut matched = self
-            .rules
-            .iter()
-            .filter_map(|rule| {
-                rule.selector
-                    .matches(path)
-                    .map(|bonus| (rule.specificity + bonus, rule.order, &rule.style))
-            })
-            .collect::<Vec<_>>();
-
-        matched.sort_by_key(|(specificity, order, _)| (*specificity, *order));
-
-        let mut style = UiStyle::default();
-        for (_, _, rule_style) in matched {
-            style.merge(rule_style);
-        }
-        style.apply_inline_attributes(node);
-        style
-    }
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UiStyle {
-    pub width: Option<Length>,
-    pub height: Option<Length>,
-    pub min_width: Option<Length>,
-    pub min_height: Option<Length>,
-    pub max_width: Option<Length>,
-    pub max_height: Option<Length>,
-    pub padding: Option<EdgeSizes>,
-    pub margin: Option<EdgeSizes>,
-    pub border: Option<EdgeSizes>,
-    pub border_width: Option<EdgeSizes>,
-    pub border_color: Option<String>,
-    pub position: Option<PositionValue>,
-    pub left: Option<Length>,
-    pub right: Option<Length>,
-    pub top: Option<Length>,
-    pub bottom: Option<Length>,
-    pub overflow: Option<OverflowValue>,
-    pub aspect_ratio: Option<f32>,
-    pub direction: Option<FlexDirectionValue>,
-    pub flex_direction: Option<FlexDirectionValue>,
-    pub flex_wrap: Option<FlexWrapValue>,
-    pub justify: Option<JustifyValue>,
-    pub justify_content: Option<JustifyValue>,
-    pub align: Option<AlignValue>,
-    pub align_items: Option<AlignValue>,
-    pub align_self: Option<AlignSelfValue>,
-    pub gap: Option<f32>,
-    pub row_gap: Option<Length>,
-    pub column_gap: Option<Length>,
-    pub flex_grow: Option<f32>,
-    pub flex_shrink: Option<f32>,
-    pub flex_basis: Option<Length>,
-    pub background: Option<String>,
-    pub color: Option<String>,
-    pub font_size: Option<f32>,
-    pub opacity: Option<f32>,
-    pub outline: Option<OutlineStyle>,
-    pub outline_width: Option<Length>,
-    pub outline_color: Option<String>,
-    pub outline_offset: Option<Length>,
-    pub z_index: Option<i32>,
-    pub visibility: Option<VisibilityValue>,
-    pub text_align: Option<TextAlignValue>,
-    pub text_wrap: Option<TextWrapValue>,
-    pub border_radius: Option<String>,
-    pub box_shadow: Option<String>,
-    pub filter: Option<String>,
-    pub backdrop_filter: Option<String>,
-    pub display: Option<DisplayValue>,
-    pub hover: Option<Box<UiStyle>>,
-    pub active: Option<Box<UiStyle>>,
-    pub focus: Option<Box<UiStyle>>,
-    pub disabled: Option<Box<UiStyle>>,
-}
-
-impl UiStyle {
-    pub fn merge(&mut self, other: &UiStyle) {
-        macro_rules! merge_field {
-            ($field:ident) => {
-                if other.$field.is_some() {
-                    self.$field = other.$field.clone();
-                }
-            };
-        }
-
-        merge_field!(width);
-        merge_field!(height);
-        merge_field!(min_width);
-        merge_field!(min_height);
-        merge_field!(max_width);
-        merge_field!(max_height);
-        merge_field!(padding);
-        merge_field!(margin);
-        merge_field!(border);
-        merge_field!(border_width);
-        merge_field!(border_color);
-        merge_field!(position);
-        merge_field!(left);
-        merge_field!(right);
-        merge_field!(top);
-        merge_field!(bottom);
-        merge_field!(overflow);
-        merge_field!(aspect_ratio);
-        merge_field!(direction);
-        merge_field!(flex_direction);
-        merge_field!(flex_wrap);
-        merge_field!(justify);
-        merge_field!(justify_content);
-        merge_field!(align);
-        merge_field!(align_items);
-        merge_field!(align_self);
-        merge_field!(gap);
-        merge_field!(row_gap);
-        merge_field!(column_gap);
-        merge_field!(flex_grow);
-        merge_field!(flex_shrink);
-        merge_field!(flex_basis);
-        merge_field!(background);
-        merge_field!(color);
-        merge_field!(font_size);
-        merge_field!(opacity);
-        merge_field!(outline);
-        merge_field!(outline_width);
-        merge_field!(outline_color);
-        merge_field!(outline_offset);
-        merge_field!(z_index);
-        merge_field!(visibility);
-        merge_field!(text_align);
-        merge_field!(text_wrap);
-        merge_field!(border_radius);
-        merge_field!(box_shadow);
-        merge_field!(filter);
-        merge_field!(backdrop_filter);
-        merge_field!(display);
-        merge_field!(hover);
-        merge_field!(active);
-        merge_field!(focus);
-        merge_field!(disabled);
-    }
-
-    fn apply_inline_attributes(&mut self, node: &ElementNode) {
-        if let Some(width) = node.attr("width").and_then(Length::parse) {
-            self.width = Some(width);
-        }
-        if let Some(height) = node.attr("height").and_then(Length::parse) {
-            self.height = Some(height);
-        }
-        if let Some(direction) = node.attr("direction").and_then(FlexDirectionValue::parse) {
-            self.direction = Some(direction);
-        }
-    }
-
-    fn without_state_styles(&self) -> Self {
-        let mut style = self.clone();
-        style.hover = None;
-        style.active = None;
-        style.focus = None;
-        style.disabled = None;
-        style
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(untagged)]
-pub enum Length {
-    Px(f32),
-    Text(String),
-}
-
-impl Length {
-    fn parse(value: &str) -> Option<Self> {
-        if let Ok(px) = value.parse::<f32>() {
-            return Some(Self::Px(px));
-        }
-        Some(Self::Text(value.to_string()))
-    }
-
-    fn into_val(self) -> Val {
-        match self {
-            Self::Px(value) => Val::Px(value),
-            Self::Text(value) => {
-                let trimmed = value.trim();
-                if trimmed.eq_ignore_ascii_case("auto") {
-                    Val::Auto
-                } else if let Some(percent) = trimmed.strip_suffix('%') {
-                    percent
-                        .trim()
-                        .parse::<f32>()
-                        .map(Val::Percent)
-                        .unwrap_or(Val::Auto)
-                } else if let Some(px) = trimmed.strip_suffix("px") {
-                    px.trim().parse::<f32>().map(Val::Px).unwrap_or(Val::Auto)
-                } else {
-                    trimmed.parse::<f32>().map(Val::Px).unwrap_or(Val::Auto)
-                }
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(untagged)]
-pub enum EdgeSizes {
-    All(Length),
-    Array(Vec<Length>),
-    Sides {
-        all: Option<Length>,
-        x: Option<Length>,
-        y: Option<Length>,
-        top: Option<Length>,
-        right: Option<Length>,
-        bottom: Option<Length>,
-        left: Option<Length>,
-    },
-}
-
-impl EdgeSizes {
-    fn to_ui_rect(&self) -> UiRect {
-        match self {
-            Self::All(value) => UiRect::all(value.clone().into_val()),
-            Self::Array(values) => match values.as_slice() {
-                [all] => UiRect::all(all.clone().into_val()),
-                [vertical, horizontal] => {
-                    UiRect::axes(horizontal.clone().into_val(), vertical.clone().into_val())
-                }
-                [top, horizontal, bottom] => UiRect {
-                    left: horizontal.clone().into_val(),
-                    right: horizontal.clone().into_val(),
-                    top: top.clone().into_val(),
-                    bottom: bottom.clone().into_val(),
-                },
-                [top, right, bottom, left, ..] => UiRect {
-                    left: left.clone().into_val(),
-                    right: right.clone().into_val(),
-                    top: top.clone().into_val(),
-                    bottom: bottom.clone().into_val(),
-                },
-                [] => UiRect::default(),
-            },
-            Self::Sides {
-                all,
-                x,
-                y,
-                top,
-                right,
-                bottom,
-                left,
-            } => {
-                let fallback = all.clone().unwrap_or(Length::Px(0.0));
-                let horizontal = x.clone().unwrap_or_else(|| fallback.clone());
-                let vertical = y.clone().unwrap_or_else(|| fallback.clone());
-                UiRect {
-                    left: left
-                        .clone()
-                        .unwrap_or_else(|| horizontal.clone())
-                        .into_val(),
-                    right: right
-                        .clone()
-                        .unwrap_or_else(|| horizontal.clone())
-                        .into_val(),
-                    top: top.clone().unwrap_or_else(|| vertical.clone()).into_val(),
-                    bottom: bottom
-                        .clone()
-                        .unwrap_or_else(|| vertical.clone())
-                        .into_val(),
-                }
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum FlexDirectionValue {
-    Row,
-    Column,
-    RowReverse,
-    ColumnReverse,
-}
-
-impl FlexDirectionValue {
-    fn parse(value: &str) -> Option<Self> {
-        match value {
-            "row" => Some(Self::Row),
-            "column" => Some(Self::Column),
-            "row-reverse" => Some(Self::RowReverse),
-            "column-reverse" => Some(Self::ColumnReverse),
-            _ => None,
-        }
-    }
-
-    fn to_bevy(self) -> FlexDirection {
-        match self {
-            Self::Row => FlexDirection::Row,
-            Self::Column => FlexDirection::Column,
-            Self::RowReverse => FlexDirection::RowReverse,
-            Self::ColumnReverse => FlexDirection::ColumnReverse,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum FlexWrapValue {
-    NoWrap,
-    Wrap,
-    WrapReverse,
-}
-
-impl FlexWrapValue {
-    fn to_bevy(self) -> FlexWrap {
-        match self {
-            Self::NoWrap => FlexWrap::NoWrap,
-            Self::Wrap => FlexWrap::Wrap,
-            Self::WrapReverse => FlexWrap::WrapReverse,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum JustifyValue {
-    FlexStart,
-    FlexEnd,
-    Center,
-    SpaceBetween,
-    SpaceAround,
-    SpaceEvenly,
-}
-
-impl JustifyValue {
-    fn to_bevy(self) -> JustifyContent {
-        match self {
-            Self::FlexStart => JustifyContent::FlexStart,
-            Self::FlexEnd => JustifyContent::FlexEnd,
-            Self::Center => JustifyContent::Center,
-            Self::SpaceBetween => JustifyContent::SpaceBetween,
-            Self::SpaceAround => JustifyContent::SpaceAround,
-            Self::SpaceEvenly => JustifyContent::SpaceEvenly,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum AlignValue {
-    FlexStart,
-    FlexEnd,
-    Center,
-    Stretch,
-}
-
-impl AlignValue {
-    fn to_bevy(self) -> AlignItems {
-        match self {
-            Self::FlexStart => AlignItems::FlexStart,
-            Self::FlexEnd => AlignItems::FlexEnd,
-            Self::Center => AlignItems::Center,
-            Self::Stretch => AlignItems::Stretch,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum AlignSelfValue {
-    Auto,
-    FlexStart,
-    FlexEnd,
-    Center,
-    Stretch,
-}
-
-impl AlignSelfValue {
-    fn to_bevy(self) -> AlignSelf {
-        match self {
-            Self::Auto => AlignSelf::Auto,
-            Self::FlexStart => AlignSelf::FlexStart,
-            Self::FlexEnd => AlignSelf::FlexEnd,
-            Self::Center => AlignSelf::Center,
-            Self::Stretch => AlignSelf::Stretch,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum DisplayValue {
-    Flex,
-    None,
-}
-
-impl DisplayValue {
-    fn to_bevy(self) -> Display {
-        match self {
-            Self::Flex => Display::Flex,
-            Self::None => Display::None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum PositionValue {
-    Relative,
-    Absolute,
-}
-
-impl PositionValue {
-    fn to_bevy(self) -> PositionType {
-        match self {
-            Self::Relative => PositionType::Relative,
-            Self::Absolute => PositionType::Absolute,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum OverflowValue {
-    Visible,
-    Hidden,
-    Clip,
-}
-
-impl OverflowValue {
-    fn to_bevy(self) -> Overflow {
-        match self {
-            Self::Visible => Overflow::visible(),
-            Self::Hidden | Self::Clip => Overflow::clip(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(untagged)]
-pub enum OutlineStyle {
-    Color(String),
-    Parts {
-        width: Option<Length>,
-        color: Option<String>,
-        offset: Option<Length>,
-    },
-}
-
-impl OutlineStyle {
-    fn width(&self) -> Option<Length> {
-        match self {
-            Self::Color(_) => None,
-            Self::Parts { width, .. } => width.clone(),
-        }
-    }
-
-    fn color(&self) -> Option<&str> {
-        match self {
-            Self::Color(color) => Some(color),
-            Self::Parts { color, .. } => color.as_deref(),
-        }
-    }
-
-    fn offset(&self) -> Option<Length> {
-        match self {
-            Self::Color(_) => None,
-            Self::Parts { offset, .. } => offset.clone(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum VisibilityValue {
-    Visible,
-    Hidden,
-    Inherited,
-}
-
-impl VisibilityValue {
-    fn to_bevy(self) -> Visibility {
-        match self {
-            Self::Visible => Visibility::Visible,
-            Self::Hidden => Visibility::Hidden,
-            Self::Inherited => Visibility::Inherited,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum TextAlignValue {
-    Left,
-    Center,
-    Right,
-}
-
-impl TextAlignValue {
-    fn to_bevy(self) -> TextAlignment {
-        match self {
-            Self::Left => TextAlignment::Left,
-            Self::Center => TextAlignment::Center,
-            Self::Right => TextAlignment::Right,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum TextWrapValue {
-    Normal,
-    WordBoundary,
-    AnyCharacter,
-    None,
-    NoWrap,
-}
-
-impl TextWrapValue {
-    fn to_bevy(self) -> BreakLineOn {
-        match self {
-            Self::Normal | Self::WordBoundary => BreakLineOn::WordBoundary,
-            Self::AnyCharacter => BreakLineOn::AnyCharacter,
-            Self::None | Self::NoWrap => BreakLineOn::NoWrap,
-        }
-    }
-}
-
-pub struct UiXmlPlugin;
-
-impl Plugin for UiXmlPlugin {
-    fn build(&self, app: &mut App) {
-        app.add_systems(Update, apply_interaction_styles);
-    }
-}
-
-type InteractionStyleQuery<'w, 's> = Query<
-    'w,
-    's,
-    (
-        Entity,
-        &'static Interaction,
-        &'static UiXmlStateStyles,
-        &'static UiXmlElement,
-        &'static mut Style,
-        &'static mut BackgroundColor,
-        &'static mut BorderColor,
-        Option<&'static mut Outline>,
-    ),
-    Changed<Interaction>,
->;
-
-fn apply_interaction_styles(
-    mut commands: Commands<'_, '_>,
-    mut query: InteractionStyleQuery<'_, '_>,
-) {
-    for (
-        entity,
-        interaction,
-        state_styles,
-        element,
-        mut bevy_style,
-        mut background,
-        mut border,
-        maybe_outline,
-    ) in &mut query
-    {
-        let resolved =
-            state_styles.resolve(*interaction, element.attributes.contains_key("disabled"));
-        *bevy_style = to_bevy_style(&resolved);
-        background.0 = style_color(
-            resolved.background.as_deref(),
-            Color::NONE,
-            resolved.opacity,
-        );
-        border.0 = style_color(
-            resolved.border_color.as_deref(),
-            Color::NONE,
-            resolved.opacity,
-        );
-        let outline = outline_from_style(&resolved);
-        match (maybe_outline, outline) {
-            (Some(mut current), Some(next)) => {
-                *current = next;
-            }
-            (None, Some(next)) => {
-                commands.entity(entity).insert(next);
-            }
-            (Some(mut current), None) => {
-                current.color = Color::NONE;
-            }
-            (None, None) => {}
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct UiXmlBuilder {
-    document: UiDocument,
-    stylesheet: StyleSheet,
-    default_font: Option<String>,
-}
-
-impl UiXmlBuilder {
-    pub fn from_strings(layout: &str, styles: &str) -> Result<Self, BevyUiXmlError> {
-        Ok(Self {
-            document: parse_layout(layout)?,
-            stylesheet: StyleSheet::parse(styles)?,
-            default_font: None,
-        })
-    }
-
-    pub fn with_default_font(mut self, path: impl Into<String>) -> Self {
-        self.default_font = Some(path.into());
-        self
-    }
-
-    pub fn spawn(&self, commands: &mut Commands<'_, '_>, asset_server: &AssetServer) -> Entity {
-        let mut ancestors = Vec::new();
-        spawn_node(
-            commands,
-            asset_server,
-            &self.document.root,
-            &self.stylesheet,
-            self.default_font.as_deref(),
-            &mut ancestors,
-        )
-    }
-}
-
-pub fn spawn_document(
-    commands: &mut Commands<'_, '_>,
-    asset_server: &AssetServer,
-    document: &UiDocument,
-    stylesheet: &StyleSheet,
-    default_font: &str,
-) -> Entity {
-    let mut ancestors = Vec::new();
-    spawn_node(
-        commands,
-        asset_server,
-        &document.root,
-        stylesheet,
-        Some(default_font),
-        &mut ancestors,
-    )
-}
-
-pub fn spawn_document_with_embedded_font(
-    commands: &mut Commands<'_, '_>,
-    asset_server: &AssetServer,
-    document: &UiDocument,
-    stylesheet: &StyleSheet,
-) -> Entity {
-    let mut ancestors = Vec::new();
-    spawn_node(
-        commands,
-        asset_server,
-        &document.root,
-        stylesheet,
-        None,
-        &mut ancestors,
-    )
-}
-
-fn spawn_node<'a>(
-    commands: &mut Commands<'_, '_>,
-    asset_server: &AssetServer,
-    node: &'a ElementNode,
-    stylesheet: &StyleSheet,
-    default_font: Option<&str>,
-    ancestors: &mut Vec<&'a ElementNode>,
-) -> Entity {
-    let mut path = ancestors.clone();
-    path.push(node);
-    let style = stylesheet.computed_style_for_path(&path);
-    let bevy_style = to_bevy_style(&style);
-    let background = style_color(style.background.as_deref(), Color::NONE, style.opacity);
-    let border_color = style_color(style.border_color.as_deref(), Color::NONE, style.opacity);
-    let text_color = style_color(style.color.as_deref(), Color::WHITE, style.opacity);
-    let font_size = style.font_size.unwrap_or(16.0);
-    let visibility = style
-        .visibility
-        .map(VisibilityValue::to_bevy)
-        .unwrap_or_default();
-    let z_index = style.z_index.map(ZIndex::Local).unwrap_or_default();
-
-    match node.widget_type() {
-        "button" => {
-            let entity = commands
-                .spawn(ButtonBundle {
-                    style: bevy_style,
-                    background_color: background.into(),
-                    border_color: border_color.into(),
-                    visibility,
-                    z_index,
-                    ..Default::default()
-                })
-                .insert(UiXmlElement::from(node))
-                .insert(UiXmlStateStyles::from_style(&style))
-                .id();
-            attach_optional_render_components(commands, entity, &style);
-
-            let label = node.attr("label").unwrap_or(&node.text);
-            if !label.trim().is_empty() {
-                let font = load_font(asset_server, default_font);
-                commands.entity(entity).with_children(|parent| {
-                    parent.spawn(TextBundle::from_section(
-                        label.trim().to_string(),
-                        TextStyle {
-                            font,
-                            font_size,
-                            color: text_color,
-                        },
-                    ));
-                });
-            }
-
-            add_children(
-                commands,
-                asset_server,
-                entity,
-                node,
-                stylesheet,
-                default_font,
-                ancestors,
-            );
-            entity
-        }
-        "text" => {
-            let font = load_font(asset_server, default_font);
-            let mut text = Text::from_section(
-                node.attr("content")
-                    .unwrap_or(&node.text)
-                    .trim()
-                    .to_string(),
-                TextStyle {
-                    font,
-                    font_size,
-                    color: text_color,
-                },
-            );
-            if let Some(text_align) = style.text_align {
-                text.alignment = text_align.to_bevy();
-            }
-            if let Some(text_wrap) = style.text_wrap {
-                text.linebreak_behavior = text_wrap.to_bevy();
-            }
-            let entity = commands
-                .spawn(TextBundle {
-                    text,
-                    style: bevy_style,
-                    background_color: background.into(),
-                    visibility,
-                    z_index,
-                    ..Default::default()
-                })
-                .insert(UiXmlElement::from(node))
-                .id();
-            attach_optional_render_components(commands, entity, &style);
-            entity
-        }
-        "image" => {
-            let image = node
-                .attr("src")
-                .map(|src| asset_server.load(src.to_string()));
-            let entity = commands
-                .spawn(ImageBundle {
-                    style: bevy_style,
-                    image: image.map(UiImage::new).unwrap_or_default(),
-                    background_color: background.into(),
-                    visibility,
-                    z_index,
-                    ..Default::default()
-                })
-                .insert(UiXmlElement::from(node))
-                .id();
-            attach_optional_render_components(commands, entity, &style);
-            entity
-        }
-        _ => {
-            let entity = commands
-                .spawn(NodeBundle {
-                    style: bevy_style,
-                    background_color: background.into(),
-                    border_color: border_color.into(),
-                    visibility,
-                    z_index,
-                    ..Default::default()
-                })
-                .insert(UiXmlElement::from(node))
-                .id();
-            attach_optional_render_components(commands, entity, &style);
-            add_children(
-                commands,
-                asset_server,
-                entity,
-                node,
-                stylesheet,
-                default_font,
-                ancestors,
-            );
-            entity
-        }
-    }
-}
-
-fn add_children<'a>(
-    commands: &mut Commands<'_, '_>,
-    asset_server: &AssetServer,
-    parent: Entity,
-    node: &'a ElementNode,
-    stylesheet: &StyleSheet,
-    default_font: Option<&str>,
-    ancestors: &mut Vec<&'a ElementNode>,
-) {
-    ancestors.push(node);
-    for child in &node.children {
-        let child_entity = spawn_node(
-            commands,
-            asset_server,
-            child,
-            stylesheet,
-            default_font,
-            ancestors,
-        );
-        commands.entity(parent).add_child(child_entity);
-    }
-    ancestors.pop();
-}
-
-fn attach_optional_render_components(
-    commands: &mut Commands<'_, '_>,
-    entity: Entity,
-    style: &UiStyle,
-) {
-    if let Some(outline) = outline_from_style(style) {
-        commands.entity(entity).insert(outline);
-    }
-    if let Some(effects) = unsupported_effects_from_style(style) {
-        commands.entity(entity).insert(effects);
-    }
-}
-
-fn load_font(asset_server: &AssetServer, default_font: Option<&str>) -> Handle<Font> {
-    default_font
-        .map(|path| asset_server.load(path.to_string()))
-        .unwrap_or_default()
-}
-
-fn outline_from_style(style: &UiStyle) -> Option<Outline> {
-    let width = style
-        .outline_width
-        .clone()
-        .or_else(|| style.outline.as_ref().and_then(OutlineStyle::width))
-        .map(Length::into_val)?;
-    let offset = style
-        .outline_offset
-        .clone()
-        .or_else(|| style.outline.as_ref().and_then(OutlineStyle::offset))
-        .map(Length::into_val)
-        .unwrap_or(Val::ZERO);
-    let color = style_color(
-        style
-            .outline_color
-            .as_deref()
-            .or_else(|| style.outline.as_ref().and_then(OutlineStyle::color)),
-        Color::WHITE,
-        style.opacity,
-    );
-
-    Some(Outline::new(width, offset, color))
-}
-
-fn unsupported_effects_from_style(style: &UiStyle) -> Option<UiXmlUnsupportedEffects> {
-    let mut effects = Vec::new();
-    if let Some(value) = &style.border_radius {
-        effects.push(UnsupportedEffect::BorderRadius(value.clone()));
-    }
-    if let Some(value) = &style.box_shadow {
-        effects.push(UnsupportedEffect::BoxShadow(value.clone()));
-    }
-    if let Some(value) = &style.filter {
-        effects.push(UnsupportedEffect::Filter(value.clone()));
-    }
-    if let Some(value) = &style.backdrop_filter {
-        effects.push(UnsupportedEffect::BackdropFilter(value.clone()));
-    }
-
-    (!effects.is_empty()).then_some(UiXmlUnsupportedEffects { effects })
-}
-
-fn to_bevy_style(style: &UiStyle) -> Style {
-    let mut bevy_style = Style::default();
-
-    if let Some(width) = style.width.clone() {
-        bevy_style.width = width.into_val();
-    }
-    if let Some(height) = style.height.clone() {
-        bevy_style.height = height.into_val();
-    }
-    if let Some(min_width) = style.min_width.clone() {
-        bevy_style.min_width = min_width.into_val();
-    }
-    if let Some(min_height) = style.min_height.clone() {
-        bevy_style.min_height = min_height.into_val();
-    }
-    if let Some(max_width) = style.max_width.clone() {
-        bevy_style.max_width = max_width.into_val();
-    }
-    if let Some(max_height) = style.max_height.clone() {
-        bevy_style.max_height = max_height.into_val();
-    }
-    if let Some(position) = style.position {
-        bevy_style.position_type = position.to_bevy();
-    }
-    if let Some(left) = style.left.clone() {
-        bevy_style.left = left.into_val();
-    }
-    if let Some(right) = style.right.clone() {
-        bevy_style.right = right.into_val();
-    }
-    if let Some(top) = style.top.clone() {
-        bevy_style.top = top.into_val();
-    }
-    if let Some(bottom) = style.bottom.clone() {
-        bevy_style.bottom = bottom.into_val();
-    }
-    if let Some(overflow) = style.overflow {
-        bevy_style.overflow = overflow.to_bevy();
-    }
-    if let Some(aspect_ratio) = style.aspect_ratio {
-        bevy_style.aspect_ratio = Some(aspect_ratio);
-    }
-    if let Some(padding) = &style.padding {
-        bevy_style.padding = padding.to_ui_rect();
-    }
-    if let Some(margin) = &style.margin {
-        bevy_style.margin = margin.to_ui_rect();
-    }
-    if let Some(border) = &style.border_width {
-        bevy_style.border = border.to_ui_rect();
-    } else if let Some(border) = &style.border {
-        bevy_style.border = border.to_ui_rect();
-    }
-    if let Some(direction) = style.flex_direction.or(style.direction) {
-        bevy_style.flex_direction = direction.to_bevy();
-    }
-    if let Some(flex_wrap) = style.flex_wrap {
-        bevy_style.flex_wrap = flex_wrap.to_bevy();
-    }
-    if let Some(justify) = style.justify_content.or(style.justify) {
-        bevy_style.justify_content = justify.to_bevy();
-    }
-    if let Some(align) = style.align_items.or(style.align) {
-        bevy_style.align_items = align.to_bevy();
-    }
-    if let Some(align_self) = style.align_self {
-        bevy_style.align_self = align_self.to_bevy();
-    }
-    if let Some(gap) = style.gap {
-        bevy_style.row_gap = Val::Px(gap);
-        bevy_style.column_gap = Val::Px(gap);
-    }
-    if let Some(row_gap) = style.row_gap.clone() {
-        bevy_style.row_gap = row_gap.into_val();
-    }
-    if let Some(column_gap) = style.column_gap.clone() {
-        bevy_style.column_gap = column_gap.into_val();
-    }
-    if let Some(flex_grow) = style.flex_grow {
-        bevy_style.flex_grow = flex_grow;
-    }
-    if let Some(flex_shrink) = style.flex_shrink {
-        bevy_style.flex_shrink = flex_shrink;
-    }
-    if let Some(flex_basis) = style.flex_basis.clone() {
-        bevy_style.flex_basis = flex_basis.into_val();
-    }
-    if let Some(display) = style.display {
-        bevy_style.display = display.to_bevy();
-    }
-
-    bevy_style
-}
-
-fn style_color(value: Option<&str>, fallback: Color, opacity: Option<f32>) -> Color {
-    let mut color = parse_color(value).unwrap_or(fallback);
-    if let Some(opacity) = opacity {
-        let [r, g, b, a] = color.as_rgba_f32();
-        color = Color::rgba(r, g, b, a * opacity.clamp(0.0, 1.0));
-    }
-    color
-}
-
-fn parse_color(value: Option<&str>) -> Option<Color> {
-    let value = value?.trim();
-    if value.eq_ignore_ascii_case("transparent") {
-        return Some(Color::NONE);
-    }
-    if let Some(hex) = value.strip_prefix('#') {
-        return parse_hex_color(hex);
-    }
-    if let Some(color) = parse_rgb_function(value) {
-        return Some(color);
-    }
-    if let Some(color) = parse_gradient_fallback(value) {
-        return Some(color);
-    }
-    parse_named_color(value)
-}
-
-fn parse_hex_color(hex: &str) -> Option<Color> {
-    match hex.len() {
-        3 => {
-            let r = u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()?;
-            let g = u8::from_str_radix(&hex[1..2].repeat(2), 16).ok()?;
-            let b = u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()?;
-            Some(Color::rgb_u8(r, g, b))
-        }
-        6 => {
-            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-            Some(Color::rgb_u8(r, g, b))
-        }
-        8 => {
-            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-            let a = u8::from_str_radix(&hex[6..8], 16).ok()?;
-            Some(Color::rgba_u8(r, g, b, a))
-        }
-        _ => None,
-    }
-}
-
-fn parse_rgb_function(value: &str) -> Option<Color> {
-    let value = value.trim();
-    let (function, args) = value.split_once('(')?;
-    let function = function.trim().to_ascii_lowercase();
-    if function != "rgb" && function != "rgba" {
-        return None;
-    }
-
-    let args = args.strip_suffix(')')?;
-    let parts = split_css_args(args);
-    if parts.len() < 3 || parts.len() > 4 {
-        return None;
-    }
-
-    let r = parse_rgb_component(&parts[0])?;
-    let g = parse_rgb_component(&parts[1])?;
-    let b = parse_rgb_component(&parts[2])?;
-    let a = parts
-        .get(3)
-        .and_then(|value| parse_alpha_component(value))
-        .unwrap_or(1.0);
-
-    Some(Color::rgba(
-        f32::from(r) / 255.0,
-        f32::from(g) / 255.0,
-        f32::from(b) / 255.0,
-        a,
-    ))
-}
-
-fn parse_rgb_component(value: &str) -> Option<u8> {
-    let value = value.trim();
-    if let Some(percent) = value.strip_suffix('%') {
-        let percent = percent.trim().parse::<f32>().ok()?.clamp(0.0, 100.0);
-        return Some((percent * 2.55).round() as u8);
-    }
-
-    Some(value.parse::<f32>().ok()?.round().clamp(0.0, 255.0) as u8)
-}
-
-fn parse_alpha_component(value: &str) -> Option<f32> {
-    let value = value.trim();
-    if let Some(percent) = value.strip_suffix('%') {
-        return Some((percent.trim().parse::<f32>().ok()? / 100.0).clamp(0.0, 1.0));
-    }
-
-    let alpha = value.parse::<f32>().ok()?;
-    if alpha > 1.0 {
-        Some((alpha / 255.0).clamp(0.0, 1.0))
-    } else {
-        Some(alpha.clamp(0.0, 1.0))
-    }
-}
-
-fn parse_gradient_fallback(value: &str) -> Option<Color> {
-    let value = value.trim();
-    let (function, args) = value.split_once('(')?;
-    let function = function.trim().to_ascii_lowercase();
-    if function != "linear-gradient" && function != "radial-gradient" {
-        return None;
-    }
-
-    let args = args.strip_suffix(')')?;
-    split_css_args(args)
-        .into_iter()
-        .filter_map(|part| parse_color_stop(&part))
-        .next()
-}
-
-fn parse_color_stop(value: &str) -> Option<Color> {
-    let value = value.trim();
-    if let Some(color) = parse_color(Some(value)) {
-        return Some(color);
-    }
-
-    if let Some(end) = value.find(')') {
-        if let Some(color) = parse_color(Some(&value[..=end])) {
-            return Some(color);
-        }
-    }
-
-    value
-        .split_whitespace()
-        .next()
-        .and_then(|candidate| parse_color(Some(candidate)))
-}
-
-fn split_css_args(value: &str) -> Vec<String> {
-    let mut args = Vec::new();
-    let mut depth = 0usize;
-    let mut start = 0usize;
-
-    for (index, ch) in value.char_indices() {
-        match ch {
-            '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                args.push(value[start..index].trim().to_string());
-                start = index + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-
-    args.push(value[start..].trim().to_string());
-    args
-}
-
-fn parse_named_color(value: &str) -> Option<Color> {
-    match value.to_ascii_lowercase().as_str() {
-        "black" => Some(Color::BLACK),
-        "white" => Some(Color::WHITE),
-        "red" => Some(Color::rgb_u8(255, 0, 0)),
-        "crimson" => Some(Color::rgb_u8(220, 20, 60)),
-        "darkred" => Some(Color::rgb_u8(139, 0, 0)),
-        "tomato" => Some(Color::rgb_u8(255, 99, 71)),
-        "green" => Some(Color::rgb_u8(0, 128, 0)),
-        "forestgreen" => Some(Color::rgb_u8(34, 139, 34)),
-        "limegreen" => Some(Color::rgb_u8(50, 205, 50)),
-        "blue" => Some(Color::rgb_u8(0, 0, 255)),
-        "royalblue" => Some(Color::rgb_u8(65, 105, 225)),
-        "yellow" => Some(Color::rgb_u8(255, 255, 0)),
-        "gold" => Some(Color::rgb_u8(255, 215, 0)),
-        "deepskyblue" => Some(Color::rgb_u8(0, 191, 255)),
-        "lightgray" | "lightgrey" => Some(Color::rgb_u8(211, 211, 211)),
-        "gray" | "grey" => Some(Color::rgb_u8(128, 128, 128)),
-        "slategray" | "slategrey" => Some(Color::rgb_u8(112, 128, 144)),
-        "cornflowerblue" => Some(Color::rgb_u8(100, 149, 237)),
-        "dodgerblue" => Some(Color::rgb_u8(30, 144, 255)),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render_effects::{outline_from_style, unsupported_effects_from_style};
+    use crate::selector::{Combinator, PseudoClass, Selector};
+    use crate::style::parse_color;
+    use bevy::prelude::*;
 
     #[test]
     fn parses_html_like_xml() {
@@ -2300,5 +367,815 @@ mod tests {
             states.resolve(Interaction::Hovered, true).opacity,
             Some(0.5)
         );
+    }
+
+    #[test]
+    fn characterizes_static_pseudo_classes_and_nested_state_blocks() {
+        let doc = parse_layout(r#"<button id="save" disabled="true">Save</button>"#).unwrap();
+        let sheet = StyleSheet::parse(
+            r##"{
+                "styles": {
+                    "button": {"background": "black"},
+                    "button:hover": {"background": "dodgerblue"},
+                    "button:active": {"background": "darkred"},
+                    "button:focus": {"outline-width": 3},
+                    "button:disabled": {"opacity": 0.4},
+                    "#save": {
+                        "hover": {"background": "gold"},
+                        "active": {"background": "tomato"},
+                        "focus": {"outline-width": 2},
+                        "disabled": {"background": "gray", "opacity": 0.5}
+                    }
+                }
+            }"##,
+        )
+        .unwrap();
+
+        let style = sheet.computed_style(&doc.root);
+        assert_eq!(style.background.as_deref(), Some("black"));
+        assert_eq!(style.opacity, Some(0.4));
+        assert_eq!(style.outline_width, None);
+
+        let states = UiXmlStateStyles::from_style(&style);
+        assert_eq!(
+            states
+                .resolve(Interaction::Hovered, false)
+                .background
+                .as_deref(),
+            Some("gold")
+        );
+        assert_eq!(
+            states
+                .resolve(Interaction::Pressed, false)
+                .background
+                .as_deref(),
+            Some("tomato")
+        );
+        let disabled = states.resolve(Interaction::Hovered, true);
+        assert_eq!(disabled.background.as_deref(), Some("gray"));
+        assert_eq!(disabled.opacity, Some(0.5));
+    }
+
+    #[test]
+    fn runtime_state_cascade_uses_bevy_state_instead_of_static_disabled_metadata() {
+        let doc = parse_layout(r#"<button id="save" disabled="true">Save</button>"#).unwrap();
+        let sheet = StyleSheet::parse(
+            r##"{
+                "styles": {
+                    "button": {"background": "black"},
+                    "button:hover": {"background": "dodgerblue"},
+                    "button:active": {"background": "darkred"},
+                    "button:disabled": {"opacity": 0.4},
+                    "#save": {
+                        "hover": {"background": "gold"},
+                        "disabled": {"background": "gray", "opacity": 0.5}
+                    }
+                }
+            }"##,
+        )
+        .unwrap();
+
+        let base = sheet.runtime_base_style_for_path(&[&doc.root]);
+        let hover = sheet.runtime_state_style_for_path(&[&doc.root], PseudoClass::Hover);
+        let active = sheet.runtime_state_style_for_path(&[&doc.root], PseudoClass::Active);
+        let focus = sheet.runtime_state_style_for_path(&[&doc.root], PseudoClass::Focus);
+        let disabled = sheet.runtime_state_style_for_path(&[&doc.root], PseudoClass::Disabled);
+        let states =
+            UiXmlStateStyles::from_runtime_styles(&base, &hover, &active, &focus, &disabled);
+
+        assert_eq!(base.background.as_deref(), Some("black"));
+        assert_eq!(base.opacity, None);
+        assert_eq!(
+            states
+                .resolve(Interaction::Hovered, false)
+                .background
+                .as_deref(),
+            Some("gold")
+        );
+        assert_eq!(
+            states
+                .resolve(Interaction::Pressed, false)
+                .background
+                .as_deref(),
+            Some("darkred")
+        );
+        let disabled = states.resolve(Interaction::Hovered, true);
+        assert_eq!(disabled.background.as_deref(), Some("gray"));
+        assert_eq!(disabled.opacity, Some(0.5));
+    }
+
+    #[test]
+    fn runtime_system_restyles_when_interaction_or_disabled_changes() {
+        let mut app = App::new();
+        app.add_plugins(UiXmlPlugin);
+
+        let base = UiStyle {
+            background: Some("black".to_string()),
+            ..Default::default()
+        };
+        let hover = UiStyle {
+            background: Some("dodgerblue".to_string()),
+            ..Default::default()
+        };
+        let active = UiStyle {
+            background: Some("darkred".to_string()),
+            ..Default::default()
+        };
+        let disabled = UiStyle {
+            background: Some("gray".to_string()),
+            opacity: Some(0.5),
+            ..Default::default()
+        };
+
+        let entity = app
+            .world
+            .spawn((
+                Interaction::None,
+                UiXmlDisabled(false),
+                UiXmlRuntimeState::default(),
+                UiXmlStyleSource {
+                    base,
+                    hover,
+                    active,
+                    focus: UiStyle::default(),
+                    disabled,
+                },
+                Style::default(),
+                BackgroundColor(Color::NONE),
+                BorderColor(Color::NONE),
+            ))
+            .id();
+
+        app.update();
+        app.world.entity_mut(entity).insert(Interaction::Hovered);
+        app.update();
+        assert_eq!(
+            app.world
+                .entity(entity)
+                .get::<BackgroundColor>()
+                .unwrap()
+                .0
+                .as_rgba_u8(),
+            [30, 144, 255, 255]
+        );
+
+        app.world.entity_mut(entity).insert(UiXmlDisabled(true));
+        app.update();
+        assert_eq!(
+            app.world
+                .entity(entity)
+                .get::<BackgroundColor>()
+                .unwrap()
+                .0
+                .as_rgba_u8(),
+            [128, 128, 128, 127]
+        );
+
+        app.world.entity_mut(entity).insert(UiXmlDisabled(false));
+        app.update();
+        assert_eq!(
+            app.world
+                .entity(entity)
+                .get::<BackgroundColor>()
+                .unwrap()
+                .0
+                .as_rgba_u8(),
+            [30, 144, 255, 255]
+        );
+    }
+
+    #[test]
+    fn builder_spawn_preserves_nested_runtime_state_blocks() {
+        const LAYOUT: &str = r#"<ui><button id="save">Save</button></ui>"#;
+        const STYLES: &str = r##"{
+            "styles": {
+                "#save": {
+                    "background": "black",
+                    "hover": {"background": "dodgerblue"},
+                    "disabled": {"background": "gray", "opacity": 0.5}
+                }
+            }
+        }"##;
+
+        let ui = UiXmlBuilder::from_strings(LAYOUT, STYLES).unwrap();
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::asset::AssetPlugin::default(),
+            UiXmlPlugin,
+        ));
+        app.add_systems(
+            Startup,
+            move |mut commands: Commands<'_, '_>, asset_server: Res<'_, AssetServer>| {
+                ui.spawn(&mut commands, &asset_server);
+            },
+        );
+
+        app.update();
+        let mut query = app.world.query::<(Entity, &UiXmlElement)>();
+        let button = query
+            .iter(&app.world)
+            .find_map(|(entity, element)| (element.id.as_deref() == Some("save")).then_some(entity))
+            .unwrap();
+
+        app.world.entity_mut(button).insert(Interaction::Hovered);
+        app.update();
+        assert_eq!(
+            app.world
+                .entity(button)
+                .get::<BackgroundColor>()
+                .unwrap()
+                .0
+                .as_rgba_u8(),
+            [30, 144, 255, 255]
+        );
+
+        app.world.entity_mut(button).insert(UiXmlDisabled(true));
+        app.update();
+        assert_eq!(
+            app.world
+                .entity(button)
+                .get::<BackgroundColor>()
+                .unwrap()
+                .0
+                .as_rgba_u8(),
+            [128, 128, 128, 127]
+        );
+    }
+
+    #[test]
+    fn selector_context_cache_tracks_spawned_runtime_context() {
+        let mut app = App::new();
+        app.add_plugins(UiXmlPlugin);
+
+        let doc = parse_layout(
+            r#"<ui id="root"><div class="menu"><button id="save">Save</button></div></ui>"#,
+        )
+        .unwrap();
+        let root = &doc.root;
+        let menu = &root.children[0];
+        let button = &menu.children[0];
+        let root_entity = Entity::from_raw(1);
+        let menu_context = UiXmlSelectorContext::from_node(menu, Some(root_entity), &[root]);
+
+        let entity = app.world.spawn(menu_context.clone()).id();
+        app.update();
+
+        let cache = app.world.resource::<UiXmlSelectorContextCache>();
+        let cached = cache.entities.get(&entity).unwrap();
+        assert_eq!(cached.parent, Some(root_entity));
+        assert_eq!(cached.ancestors.len(), 1);
+        assert_eq!(cached.ancestors[0].id.as_deref(), Some("root"));
+        assert_eq!(cached.id, menu_context.id);
+
+        let button_context = UiXmlSelectorContext::from_node(button, Some(entity), &[root, menu]);
+        app.world.entity_mut(entity).insert(button_context);
+        app.update();
+        let cache = app.world.resource::<UiXmlSelectorContextCache>();
+        let cached = cache.entities.get(&entity).unwrap();
+        assert_eq!(cached.parent, Some(entity));
+        assert_eq!(cached.ancestors.len(), 2);
+        assert_eq!(cached.id.as_deref(), Some("save"));
+    }
+
+    #[test]
+    fn characterizes_source_order_specificity_inline_and_alias_precedence() {
+        let doc = parse_layout(
+            r#"
+            <ui>
+                <btn id="save" class="primary" width="320">Save</btn>
+            </ui>
+            "#,
+        )
+        .unwrap();
+        let button = &doc.root.children[0];
+        let sheet = StyleSheet::parse(
+            r##"{
+                "styles": {
+                    "button": {"width": 100, "height": 30, "background": "black"},
+                    "button": {"height": 32},
+                    ".primary": {"width": 180, "background": "royalblue"},
+                    "button.primary": {"background": "tomato"},
+                    "#save": {"height": 44},
+                    "btn": {"fontSize": 20}
+                }
+            }"##,
+        )
+        .unwrap();
+
+        let style = sheet.computed_style_for_path(&[&doc.root, button]);
+        assert_eq!(style.width, Some(Length::Px(320.0)));
+        assert_eq!(style.height, Some(Length::Px(44.0)));
+        assert_eq!(style.background.as_deref(), Some("tomato"));
+        assert_eq!(style.font_size, Some(20.0));
+    }
+
+    fn spawn_test_app(layout: &str, styles: &str) -> App {
+        let ui = UiXmlBuilder::from_strings(layout, styles).unwrap();
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::asset::AssetPlugin::default(),
+            UiXmlPlugin,
+        ));
+        app.add_systems(
+            Startup,
+            move |mut commands: Commands<'_, '_>, asset_server: Res<'_, AssetServer>| {
+                ui.spawn(&mut commands, &asset_server);
+            },
+        );
+        app.update();
+        app
+    }
+
+    fn entity_by_id(app: &mut App, id: &str) -> Entity {
+        let mut query = app.world.query::<(Entity, &UiXmlElement)>();
+        query
+            .iter(&app.world)
+            .find_map(|(entity, element)| (element.id.as_deref() == Some(id)).then_some(entity))
+            .unwrap()
+    }
+
+    fn drain_control_events(app: &mut App) -> Vec<UiXmlControlChanged> {
+        app.world
+            .resource_mut::<Events<UiXmlControlChanged>>()
+            .drain()
+            .collect()
+    }
+
+    fn press_control(app: &mut App, entity: Entity) {
+        app.world.entity_mut(entity).insert(Interaction::Pressed);
+        app.update();
+    }
+
+    #[test]
+    fn focus_runtime_uses_uixml_focus_resource_as_source_of_truth() {
+        let doc = parse_layout(r#"<button id="save">Save</button>"#).unwrap();
+        let sheet = StyleSheet::parse(
+            r##"{
+                "styles": {
+                    "button": {"background": "black"},
+                    "button:focus": {"outline-width": 3},
+                    "#save": {"focus": {"outline-color": "gold"}}
+                }
+            }"##,
+        )
+        .unwrap();
+
+        let base = sheet.runtime_base_style_for_path(&[&doc.root]);
+        assert_eq!(base.background.as_deref(), Some("black"));
+        assert_eq!(base.outline_width, None);
+        assert_eq!(
+            sheet
+                .runtime_state_style_for_path(&[&doc.root], PseudoClass::Focus)
+                .outline_width,
+            Some(Length::Px(3.0))
+        );
+
+        let mut app = App::new();
+        app.add_plugins(UiXmlPlugin);
+        let entity = app
+            .world
+            .spawn((
+                UiXmlRuntimeState {
+                    focused: true,
+                    ..Default::default()
+                },
+                UiXmlDisabled(false),
+                UiXmlStyleSource::from_runtime_styles(
+                    &base,
+                    &UiStyle::default(),
+                    &UiStyle::default(),
+                    &sheet.runtime_state_style_for_path(&[&doc.root], PseudoClass::Focus),
+                    &UiStyle::default(),
+                ),
+                Style::default(),
+                BackgroundColor(Color::NONE),
+                BorderColor(Color::NONE),
+            ))
+            .id();
+
+        app.update();
+        assert!(app.world.entity(entity).get::<Outline>().is_none());
+
+        app.world.resource_mut::<UiXmlFocus>().entity = Some(entity);
+        app.update();
+        let outline = app.world.entity(entity).get::<Outline>().unwrap();
+        assert_eq!(outline.width, Val::Px(3.0));
+        assert_eq!(outline.color.as_rgba_u8(), [255, 215, 0, 255]);
+
+        app.world.entity_mut(entity).insert(UiXmlDisabled(true));
+        app.update();
+        assert!(
+            !app.world
+                .entity(entity)
+                .get::<UiXmlRuntimeState>()
+                .unwrap()
+                .focused
+        );
+        assert_eq!(
+            app.world
+                .entity(entity)
+                .get::<Outline>()
+                .unwrap()
+                .color
+                .as_rgba_u8(),
+            [0, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn parser_widgets_forms_distinguishes_control_identity_and_preserves_metadata() {
+        let doc = parse_layout(
+            r#"
+            <form id="profile">
+                <input id="agree" type="checkbox" name="terms" value="yes" checked="true" />
+                <checkbox id="short" />
+                <input id="small" type="radio" name="size" />
+                <radio id="large" />
+                <input id="email" type="text" placeholder="Email" />
+            </form>
+            "#,
+        )
+        .unwrap();
+
+        let children = &doc.root.children;
+        assert_eq!(doc.root.widget_type(), "form");
+        assert_eq!(children[0].tag, "input");
+        assert_eq!(children[0].widget_type(), "checkbox");
+        assert_eq!(children[0].attr("type"), Some("checkbox"));
+        assert_eq!(children[1].widget_type(), "checkbox");
+        assert_eq!(children[2].tag, "input");
+        assert_eq!(children[2].widget_type(), "radio");
+        assert_eq!(children[3].widget_type(), "radio");
+        assert_eq!(children[4].widget_type(), "input");
+        assert_eq!(children[4].attr("placeholder"), Some("Email"));
+    }
+
+    #[test]
+    fn builder_forms_assigns_scope_and_seeds_control_metadata() {
+        let mut app = spawn_test_app(
+            r#"
+            <ui id="root">
+                <form id="profile">
+                    <input id="agree" type="checkbox" name="terms" value="yes" checked="true" disabled="true" />
+                </form>
+                <input id="outside" type="radio" name="size" />
+            </ui>
+            "#,
+            r#"{}"#,
+        );
+
+        let root = entity_by_id(&mut app, "root");
+        let form = entity_by_id(&mut app, "profile");
+        let agree = entity_by_id(&mut app, "agree");
+        let outside = entity_by_id(&mut app, "outside");
+
+        let agree_entity = app.world.entity(agree);
+        assert_eq!(
+            agree_entity.get::<UiXmlControlKind>(),
+            Some(&UiXmlControlKind::Checkbox)
+        );
+        assert_eq!(
+            agree_entity.get::<UiXmlChecked>(),
+            Some(&UiXmlChecked(true))
+        );
+        assert_eq!(
+            agree_entity.get::<UiXmlDisabled>(),
+            Some(&UiXmlDisabled(true))
+        );
+        assert_eq!(
+            agree_entity
+                .get::<UiXmlControlName>()
+                .map(|name| name.0.as_str()),
+            Some("terms")
+        );
+        assert_eq!(
+            agree_entity
+                .get::<UiXmlControlValue>()
+                .map(|value| value.0.as_str()),
+            Some("yes")
+        );
+        assert_eq!(
+            agree_entity.get::<UiXmlControlScope>(),
+            Some(&UiXmlControlScope(form))
+        );
+        assert!(app.world.entity(form).contains::<UiXmlForm>());
+        assert_eq!(
+            app.world.entity(outside).get::<UiXmlControlScope>(),
+            Some(&UiXmlControlScope(root))
+        );
+    }
+
+    #[test]
+    fn checkbox_controls_events_toggle_and_respect_disabled() {
+        let mut app = spawn_test_app(
+            r#"
+            <ui id="root">
+                <input id="agree" type="checkbox" name="terms" value="yes" />
+                <input id="blocked" type="checkbox" checked="true" disabled="true" />
+            </ui>
+            "#,
+            r#"{}"#,
+        );
+        drain_control_events(&mut app);
+
+        let agree = entity_by_id(&mut app, "agree");
+        press_control(&mut app, agree);
+        let events = drain_control_events(&mut app);
+
+        assert_eq!(
+            app.world.entity(agree).get::<UiXmlChecked>(),
+            Some(&UiXmlChecked(true))
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].entity, agree);
+        assert_eq!(events[0].kind, UiXmlControlKind::Checkbox);
+        assert_eq!(events[0].name.as_deref(), Some("terms"));
+        assert_eq!(events[0].value, "yes");
+        assert!(events[0].checked);
+        assert!(!events[0].previous_checked);
+
+        let blocked = entity_by_id(&mut app, "blocked");
+        press_control(&mut app, blocked);
+        let disabled_events = drain_control_events(&mut app);
+        assert_eq!(
+            app.world.entity(blocked).get::<UiXmlChecked>(),
+            Some(&UiXmlChecked(true))
+        );
+        assert!(disabled_events.is_empty());
+    }
+
+    #[test]
+    fn radio_controls_events_scope_grouping_and_initial_normalization() {
+        let mut app = spawn_test_app(
+            r#"
+            <ui id="root">
+                <form id="first">
+                    <input id="small" type="radio" name="size" value="s" checked="true" />
+                    <input id="large" type="radio" name="size" value="l" checked="true" />
+                </form>
+                <form id="second">
+                    <input id="other" type="radio" name="size" value="o" checked="true" />
+                </form>
+                <input id="outside-a" type="radio" name="size" checked="true" />
+                <input id="outside-b" type="radio" name="size" />
+                <input id="unnamed-a" type="radio" checked="true" />
+                <input id="unnamed-b" type="radio" />
+            </ui>
+            "#,
+            r#"{}"#,
+        );
+        assert!(drain_control_events(&mut app).is_empty());
+
+        let small = entity_by_id(&mut app, "small");
+        let large = entity_by_id(&mut app, "large");
+        let other = entity_by_id(&mut app, "other");
+        assert_eq!(
+            app.world.entity(small).get::<UiXmlChecked>(),
+            Some(&UiXmlChecked(false))
+        );
+        assert_eq!(
+            app.world.entity(large).get::<UiXmlChecked>(),
+            Some(&UiXmlChecked(true))
+        );
+        assert_eq!(
+            app.world.entity(other).get::<UiXmlChecked>(),
+            Some(&UiXmlChecked(true))
+        );
+
+        press_control(&mut app, small);
+        let form_events = drain_control_events(&mut app);
+        assert_eq!(form_events.len(), 2);
+        assert_eq!(
+            app.world.entity(small).get::<UiXmlChecked>(),
+            Some(&UiXmlChecked(true))
+        );
+        assert_eq!(
+            app.world.entity(large).get::<UiXmlChecked>(),
+            Some(&UiXmlChecked(false))
+        );
+        assert_eq!(
+            app.world.entity(other).get::<UiXmlChecked>(),
+            Some(&UiXmlChecked(true))
+        );
+        assert!(form_events
+            .iter()
+            .any(|event| event.entity == small && event.checked && !event.previous_checked));
+        assert!(form_events
+            .iter()
+            .any(|event| event.entity == large && !event.checked && event.previous_checked));
+
+        let outside_a = entity_by_id(&mut app, "outside-a");
+        let outside_b = entity_by_id(&mut app, "outside-b");
+        press_control(&mut app, outside_b);
+        let outside_events = drain_control_events(&mut app);
+        assert_eq!(outside_events.len(), 2);
+        assert_eq!(
+            app.world.entity(outside_a).get::<UiXmlChecked>(),
+            Some(&UiXmlChecked(false))
+        );
+        assert_eq!(
+            app.world.entity(outside_b).get::<UiXmlChecked>(),
+            Some(&UiXmlChecked(true))
+        );
+
+        let unnamed_a = entity_by_id(&mut app, "unnamed-a");
+        let unnamed_b = entity_by_id(&mut app, "unnamed-b");
+        press_control(&mut app, unnamed_b);
+        let unnamed_events = drain_control_events(&mut app);
+        assert_eq!(unnamed_events.len(), 1);
+        assert_eq!(
+            app.world.entity(unnamed_a).get::<UiXmlChecked>(),
+            Some(&UiXmlChecked(true))
+        );
+        assert_eq!(
+            app.world.entity(unnamed_b).get::<UiXmlChecked>(),
+            Some(&UiXmlChecked(true))
+        );
+    }
+
+    #[test]
+    fn radio_controls_events_already_checked_peer_is_noop() {
+        let mut app = spawn_test_app(
+            r#"
+            <ui id="root">
+                <input id="small" type="radio" name="size" checked="true" />
+                <input id="large" type="radio" name="size" />
+            </ui>
+            "#,
+            r#"{}"#,
+        );
+        drain_control_events(&mut app);
+
+        let small = entity_by_id(&mut app, "small");
+        press_control(&mut app, small);
+        let events = drain_control_events(&mut app);
+
+        assert_eq!(
+            app.world.entity(small).get::<UiXmlChecked>(),
+            Some(&UiXmlChecked(true))
+        );
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn radio_controls_events_disabled_peer_is_not_cleared() {
+        let mut app = spawn_test_app(
+            r#"
+            <ui id="root">
+                <input id="locked" type="radio" name="size" checked="true" disabled="true" />
+                <input id="large" type="radio" name="size" />
+            </ui>
+            "#,
+            r#"{}"#,
+        );
+        drain_control_events(&mut app);
+
+        let locked = entity_by_id(&mut app, "locked");
+        let large = entity_by_id(&mut app, "large");
+        press_control(&mut app, large);
+        let events = drain_control_events(&mut app);
+
+        assert_eq!(
+            app.world.entity(locked).get::<UiXmlChecked>(),
+            Some(&UiXmlChecked(true))
+        );
+        assert_eq!(
+            app.world.entity(large).get::<UiXmlChecked>(),
+            Some(&UiXmlChecked(true))
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].entity, large);
+        assert!(events[0].checked);
+
+        app.update();
+        assert_eq!(
+            app.world.entity(locked).get::<UiXmlChecked>(),
+            Some(&UiXmlChecked(true))
+        );
+        assert_eq!(
+            app.world.entity(large).get::<UiXmlChecked>(),
+            Some(&UiXmlChecked(true))
+        );
+        assert!(drain_control_events(&mut app).is_empty());
+    }
+
+    #[test]
+    fn controls_events_programmatic_checked_mutation_emits_no_event() {
+        let mut app = spawn_test_app(
+            r#"<ui id="root"><input id="agree" type="checkbox" /></ui>"#,
+            r#"{}"#,
+        );
+        drain_control_events(&mut app);
+
+        let agree = entity_by_id(&mut app, "agree");
+        app.world.entity_mut(agree).insert(UiXmlChecked(true));
+        app.update();
+        let events = drain_control_events(&mut app);
+
+        assert_eq!(
+            app.world.entity(agree).get::<UiXmlChecked>(),
+            Some(&UiXmlChecked(true))
+        );
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn forms_controls_non_checkbox_radio_input_remains_metadata_only() {
+        let mut app = spawn_test_app(
+            r#"
+            <ui id="root">
+                <input id="email" type="text" name="email" value="hello@example.com" />
+            </ui>
+            "#,
+            r#"{}"#,
+        );
+        drain_control_events(&mut app);
+
+        let email = entity_by_id(&mut app, "email");
+        let email_entity = app.world.entity(email);
+        let element = email_entity.get::<UiXmlElement>().unwrap();
+
+        assert_eq!(element.tag, "input");
+        assert_eq!(element.widget_type, "input");
+        assert_eq!(
+            element.attributes.get("type").map(String::as_str),
+            Some("text")
+        );
+        assert!(!email_entity.contains::<UiXmlControlKind>());
+        assert!(!email_entity.contains::<UiXmlChecked>());
+        assert!(!email_entity.contains::<UiXmlControlValue>());
+
+        app.update();
+        assert!(drain_control_events(&mut app).is_empty());
+    }
+
+    #[test]
+    fn render_effects_unsupported_effects_runtime_metadata_remains_spawn_time_only() {
+        let mut app = spawn_test_app(
+            r#"<ui id="root"><button id="card">Card</button></ui>"#,
+            r##"{
+                "styles": {
+                    "#card": {
+                        "background": "black",
+                        "boxShadow": "0 4px 8px black",
+                        "hover": {
+                            "background": "dodgerblue",
+                            "boxShadow": "0 8px 16px black"
+                        }
+                    }
+                }
+            }"##,
+        );
+
+        let card = entity_by_id(&mut app, "card");
+        let effects = app
+            .world
+            .entity(card)
+            .get::<UiXmlUnsupportedEffects>()
+            .unwrap()
+            .clone();
+        assert!(effects
+            .effects
+            .contains(&UnsupportedEffect::BoxShadow("0 4px 8px black".to_string())));
+
+        app.world.entity_mut(card).insert(Interaction::Hovered);
+        app.update();
+        let after_hover = app
+            .world
+            .entity(card)
+            .get::<UiXmlUnsupportedEffects>()
+            .unwrap();
+        assert_eq!(&effects, after_hover);
+        assert_eq!(
+            app.world
+                .entity(card)
+                .get::<BackgroundColor>()
+                .unwrap()
+                .0
+                .as_rgba_u8(),
+            [30, 144, 255, 255]
+        );
+    }
+
+    #[test]
+    fn asset_image_text_metadata_remains_bevy_asset_server_owned() {
+        let doc = parse_layout(
+            r#"
+            <ui id="root">
+                <text id="title" content="Hello" />
+                <img id="avatar" src="textures/avatar.png" />
+            </ui>
+            "#,
+        )
+        .unwrap();
+
+        let title = &doc.root.children[0];
+        let avatar = &doc.root.children[1];
+        assert_eq!(title.widget_type(), "text");
+        assert_eq!(title.attr("content"), Some("Hello"));
+        assert_eq!(avatar.widget_type(), "image");
+        assert_eq!(avatar.attr("src"), Some("textures/avatar.png"));
     }
 }
