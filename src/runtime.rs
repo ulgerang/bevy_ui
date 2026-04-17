@@ -164,6 +164,9 @@ pub struct UiXmlControlChanged {
 }
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UiXmlTextArea;
+
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct UiXmlTextInput;
 
 #[derive(Component, Debug, Clone, PartialEq, Eq, Default)]
@@ -205,6 +208,73 @@ pub struct UiXmlTextChanged {
     pub name: Option<String>,
     pub previous_value: String,
     pub value: String,
+}
+
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UiXmlSelect;
+
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct UiXmlOption {
+    pub value: String,
+}
+
+#[derive(Component, Debug, Clone, PartialEq, Eq, Default)]
+pub struct UiXmlSelectValue(pub String);
+
+#[derive(Event, Debug, Clone, PartialEq, Eq)]
+pub struct UiXmlSelectChanged {
+    pub select: Entity,
+    pub option: Entity,
+    pub previous_value: String,
+    pub value: String,
+}
+
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct UiXmlRange {
+    pub min: f32,
+    pub max: f32,
+    pub step: f32,
+}
+
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct UiXmlRangeValue(pub f32);
+
+#[derive(Event, Debug, Clone, PartialEq)]
+pub struct UiXmlRangeChanged {
+    pub entity: Entity,
+    pub previous_value: f32,
+    pub value: f32,
+}
+
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct UiXmlProgress {
+    pub value: f32,
+    pub max: f32,
+}
+
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct UiXmlMeter {
+    pub value: f32,
+    pub min: f32,
+    pub max: f32,
+}
+
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct UiXmlFillPercent(pub f32);
+
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct UiXmlScrollContainer {
+    pub min: f32,
+    pub max: f32,
+}
+
+#[derive(Component, Debug, Clone, Copy, PartialEq, Default)]
+pub struct UiXmlScrollOffset(pub f32);
+
+#[derive(Event, Debug, Clone, Copy, PartialEq)]
+pub struct UiXmlScrollRequested {
+    pub entity: Entity,
+    pub delta: f32,
 }
 
 #[derive(Event, Debug, Clone, PartialEq, Eq)]
@@ -610,12 +680,23 @@ impl UiXmlStateStyles {
 }
 pub struct UiXmlPlugin;
 
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum UiXmlSystemSet {
+    Prep,
+    Input,
+    TextForm,
+    Style,
+}
+
 impl Plugin for UiXmlPlugin {
     fn build(&self, app: &mut App) {
         app.add_event::<UiXmlControlChanged>()
             .add_event::<UiXmlFocusChanged>()
             .add_event::<UiXmlActivateRequested>()
             .add_event::<UiXmlBackRequested>()
+            .add_event::<UiXmlSelectChanged>()
+            .add_event::<UiXmlRangeChanged>()
+            .add_event::<UiXmlScrollRequested>()
             .add_event::<UiXmlTextChanged>()
             .add_event::<UiXmlFormSubmitRequested>()
             .add_event::<UiXmlFormResetRequested>()
@@ -638,6 +719,16 @@ impl Plugin for UiXmlPlugin {
             .init_resource::<UiXmlFocus>()
             .init_resource::<UiXmlInputModality>()
             .init_resource::<UiXmlSelectorContextCache>()
+            .configure_sets(
+                Update,
+                (
+                    UiXmlSystemSet::Prep,
+                    UiXmlSystemSet::Input,
+                    UiXmlSystemSet::TextForm,
+                    UiXmlSystemSet::Style,
+                )
+                    .chain(),
+            )
             .add_systems(
                 Update,
                 (
@@ -645,22 +736,48 @@ impl Plugin for UiXmlPlugin {
                     mark_theme_runtime_generation,
                     mark_style_runtime_generation,
                     normalize_initial_radio_groups,
+                )
+                    .chain()
+                    .in_set(UiXmlSystemSet::Prep),
+            )
+            .add_systems(
+                Update,
+                (
                     focus_pressed_focusables,
                     apply_control_interactions,
                     apply_focus_navigation,
+                    apply_select_activation,
+                    apply_range_input,
+                    apply_scroll_requests,
+                )
+                    .chain()
+                    .in_set(UiXmlSystemSet::Input),
+            )
+            .add_systems(
+                Update,
+                (
                     apply_text_selection_requests,
                     apply_clipboard_requests,
                     apply_text_input,
                     apply_ime_input,
                     apply_form_reset_requests,
                     apply_form_submit_requests,
+                )
+                    .chain()
+                    .in_set(UiXmlSystemSet::TextForm),
+            )
+            .add_systems(
+                Update,
+                (
                     sync_text_display,
+                    sync_scalar_fill_percent,
                     sync_runtime_state,
                     apply_interaction_styles,
                     update_transition_styles,
                     apply_effect_materials,
                 )
-                    .chain(),
+                    .chain()
+                    .in_set(UiXmlSystemSet::Style),
             );
     }
 }
@@ -872,6 +989,163 @@ fn control_value(value: Option<&UiXmlControlValue>) -> String {
         .unwrap_or_else(|| "on".to_string())
 }
 
+fn apply_select_activation(
+    mut activations: EventReader<UiXmlActivateRequested>,
+    mut changed: EventWriter<UiXmlSelectChanged>,
+    cache: Res<UiXmlSelectorContextCache>,
+    mut selects: Query<(&mut UiXmlOpen, &mut UiXmlSelectValue), With<UiXmlSelect>>,
+    mut options: Query<(Entity, &UiXmlOption, &mut UiXmlSelected)>,
+) {
+    for activation in activations.read() {
+        if let Ok((mut open, _)) = selects.get_mut(activation.entity) {
+            open.0 = !open.0;
+            continue;
+        }
+
+        let Ok((option_entity, option, mut selected)) = options.get_mut(activation.entity) else {
+            continue;
+        };
+        let Some(select_entity) = ancestor_with_select(option_entity, &cache, &selects) else {
+            continue;
+        };
+        let next_value = option.value.clone();
+        let previous_value = {
+            let Ok((mut open, mut select_value)) = selects.get_mut(select_entity) else {
+                continue;
+            };
+            let previous_value = select_value.0.clone();
+            select_value.0 = next_value.clone();
+            open.0 = false;
+            previous_value
+        };
+        selected.0 = true;
+        for (peer_entity, _, mut peer_selected) in &mut options {
+            if peer_entity != option_entity
+                && ancestor_with_select(peer_entity, &cache, &selects) == Some(select_entity)
+            {
+                peer_selected.0 = false;
+            }
+        }
+        changed.send(UiXmlSelectChanged {
+            select: select_entity,
+            option: option_entity,
+            previous_value,
+            value: next_value,
+        });
+    }
+}
+
+fn ancestor_with_select(
+    entity: Entity,
+    cache: &UiXmlSelectorContextCache,
+    selects: &Query<(&mut UiXmlOpen, &mut UiXmlSelectValue), With<UiXmlSelect>>,
+) -> Option<Entity> {
+    let mut cursor = entity;
+    while let Some(context) = cache.entities.get(&cursor) {
+        let parent = context.parent?;
+        if selects.contains(parent) {
+            return Some(parent);
+        }
+        cursor = parent;
+    }
+    None
+}
+
+fn apply_range_input(
+    focus: Res<UiXmlFocus>,
+    mut keyboard_inputs: EventReader<KeyboardInput>,
+    mut gamepad_buttons: EventReader<GamepadButtonInput>,
+    mut changed: EventWriter<UiXmlRangeChanged>,
+    mut query: Query<(
+        Entity,
+        &'static UiXmlRange,
+        &'static mut UiXmlRangeValue,
+        Option<&'static mut UiXmlFillPercent>,
+    )>,
+) {
+    let Some(focused) = focus.entity else {
+        keyboard_inputs.clear();
+        gamepad_buttons.clear();
+        return;
+    };
+    let Ok((entity, range, mut value, fill)) = query.get_mut(focused) else {
+        return;
+    };
+    let mut delta_steps = 0.0;
+    for input in keyboard_inputs.read() {
+        if input.state != ButtonState::Pressed {
+            continue;
+        }
+        match input.key_code {
+            KeyCode::ArrowRight | KeyCode::ArrowUp => delta_steps += 1.0,
+            KeyCode::ArrowLeft | KeyCode::ArrowDown => delta_steps -= 1.0,
+            _ => {}
+        }
+    }
+    for input in gamepad_buttons.read() {
+        if input.state != ButtonState::Pressed {
+            continue;
+        }
+        match input.button.button_type {
+            GamepadButtonType::DPadRight | GamepadButtonType::DPadUp => delta_steps += 1.0,
+            GamepadButtonType::DPadLeft | GamepadButtonType::DPadDown => delta_steps -= 1.0,
+            _ => {}
+        }
+    }
+    if delta_steps == 0.0 {
+        return;
+    }
+    let previous_value = value.0;
+    value.0 = snap_scalar(
+        value.0 + delta_steps * range.step,
+        range.min,
+        range.max,
+        range.step,
+    );
+    if let Some(mut fill) = fill {
+        fill.0 = scalar_percent(value.0, range.min, range.max);
+    }
+    if (previous_value - value.0).abs() > f32::EPSILON {
+        changed.send(UiXmlRangeChanged {
+            entity,
+            previous_value,
+            value: value.0,
+        });
+    }
+}
+
+fn apply_scroll_requests(
+    mut requests: EventReader<UiXmlScrollRequested>,
+    mut query: Query<(
+        &'static UiXmlScrollContainer,
+        &'static mut UiXmlScrollOffset,
+    )>,
+) {
+    for request in requests.read() {
+        let Ok((container, mut offset)) = query.get_mut(request.entity) else {
+            continue;
+        };
+        offset.0 = (offset.0 + request.delta).clamp(container.min, container.max);
+    }
+}
+
+fn snap_scalar(value: f32, min: f32, max: f32, step: f32) -> f32 {
+    let steps = ((value - min) / step.max(f32::EPSILON)).round();
+    (min + steps * step).clamp(min, max)
+}
+
+fn scalar_percent(value: f32, min: f32, max: f32) -> f32 {
+    ((value - min) / (max - min).max(f32::EPSILON)).clamp(0.0, 1.0)
+}
+
+fn format_scalar(value: f32) -> String {
+    if value.fract().abs() <= f32::EPSILON {
+        format!("{}", value as i32)
+    } else {
+        value.to_string()
+    }
+}
+
 type TextEditDirectQuery<'w, 's> = Query<
     'w,
     's,
@@ -1014,6 +1288,7 @@ type FocusableQuery<'w, 's> = Query<
         Option<&'static Visibility>,
         Option<&'static Style>,
         Option<&'static UiXmlTextInput>,
+        Option<&'static UiXmlRange>,
     ),
 >;
 
@@ -1066,20 +1341,30 @@ fn apply_focus_navigation(
                 &mut outputs.changed,
                 &focusables,
             ),
-            KeyCode::ArrowRight if !focused_is_text_input(focus.entity, &focusables) => move_focus(
-                UiXmlNavigationDirection::Right,
-                &mut focus,
-                &mut modality,
-                &mut outputs.changed,
-                &focusables,
-            ),
-            KeyCode::ArrowLeft if !focused_is_text_input(focus.entity, &focusables) => move_focus(
-                UiXmlNavigationDirection::Left,
-                &mut focus,
-                &mut modality,
-                &mut outputs.changed,
-                &focusables,
-            ),
+            KeyCode::ArrowRight
+                if !focused_is_text_input(focus.entity, &focusables)
+                    && !focused_is_range(focus.entity, &focusables) =>
+            {
+                move_focus(
+                    UiXmlNavigationDirection::Right,
+                    &mut focus,
+                    &mut modality,
+                    &mut outputs.changed,
+                    &focusables,
+                )
+            }
+            KeyCode::ArrowLeft
+                if !focused_is_text_input(focus.entity, &focusables)
+                    && !focused_is_range(focus.entity, &focusables) =>
+            {
+                move_focus(
+                    UiXmlNavigationDirection::Left,
+                    &mut focus,
+                    &mut modality,
+                    &mut outputs.changed,
+                    &focusables,
+                )
+            }
             KeyCode::Enter => {
                 if let Some(entity) = focus.entity {
                     modality.focus_visible = true;
@@ -1209,20 +1494,22 @@ struct FocusCandidate {
 fn focusable_candidates(focusables: &FocusableQuery<'_, '_>) -> Vec<FocusCandidate> {
     let mut candidates = focusables
         .iter()
-        .filter(|(_, _, _, disabled, visibility, style, _)| {
+        .filter(|(_, _, _, disabled, visibility, style, _, _)| {
             !disabled.0
                 && !matches!(visibility, Some(Visibility::Hidden))
                 && !matches!(style.map(|style| style.display), Some(Display::None))
         })
-        .map(|(entity, focusable, element, _, _, _, _)| FocusCandidate {
-            entity,
-            id: element.id.clone(),
-            order_key: (
-                focusable.tab_index.unwrap_or(focusable.order as i32),
-                focusable.order,
-            ),
-            focusable: focusable.clone(),
-        })
+        .map(
+            |(entity, focusable, element, _, _, _, _, _)| FocusCandidate {
+                entity,
+                id: element.id.clone(),
+                order_key: (
+                    focusable.tab_index.unwrap_or(focusable.order as i32),
+                    focusable.order,
+                ),
+                focusable: focusable.clone(),
+            },
+        )
         .collect::<Vec<_>>();
     candidates.sort_by_key(|candidate| candidate.order_key);
     candidates
@@ -1282,7 +1569,15 @@ fn focused_is_text_input(current: Option<Entity>, focusables: &FocusableQuery<'_
     current.is_some_and(|entity| {
         focusables
             .get(entity)
-            .is_ok_and(|(_, _, _, _, _, _, text_input)| text_input.is_some())
+            .is_ok_and(|(_, _, _, _, _, _, text_input, _)| text_input.is_some())
+    })
+}
+
+fn focused_is_range(current: Option<Entity>, focusables: &FocusableQuery<'_, '_>) -> bool {
+    current.is_some_and(|entity| {
+        focusables
+            .get(entity)
+            .is_ok_and(|(_, _, _, _, _, _, _, range)| range.is_some())
     })
 }
 
@@ -1294,6 +1589,7 @@ type TextInputMutationQuery<'w, 's> = Query<
         &'static mut UiXmlTextValue,
         &'static mut UiXmlTextCursor,
         &'static mut UiXmlTextSelection,
+        Option<&'static UiXmlTextArea>,
         Option<&'static UiXmlControlScope>,
         Option<&'static UiXmlControlName>,
     ),
@@ -1314,7 +1610,8 @@ fn apply_text_input(
         return;
     };
 
-    let Ok((disabled, mut value, mut cursor, mut selection, scope, name)) = query.get_mut(entity)
+    let Ok((disabled, mut value, mut cursor, mut selection, text_area, scope, name)) =
+        query.get_mut(entity)
     else {
         received_characters.clear();
         keyboard_inputs.clear();
@@ -1435,6 +1732,18 @@ fn apply_text_input(
                 cursor.position = value.0.chars().count();
                 selection.anchor = cursor.position;
                 selection.focus = cursor.position;
+            }
+            KeyCode::Enter if text_area.is_some() => {
+                let previous_value = value.0.clone();
+                replace_selection_or_insert(&mut value.0, &mut cursor, &mut selection, "\n");
+                send_text_changed(
+                    &mut events,
+                    entity,
+                    scope,
+                    name,
+                    previous_value,
+                    value.0.clone(),
+                );
             }
             _ => {}
         }
@@ -1605,6 +1914,28 @@ type FormControlQuery<'w, 's> = Query<
     ),
 >;
 
+type FormSelectQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static UiXmlControlScope,
+        Option<&'static UiXmlControlName>,
+        &'static UiXmlSelectValue,
+    ),
+    With<UiXmlSelect>,
+>;
+
+type FormRangeQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static UiXmlControlScope,
+        Option<&'static UiXmlControlName>,
+        &'static UiXmlRangeValue,
+    ),
+    With<UiXmlRange>,
+>;
+
 type FormTextResetQuery<'w, 's> = Query<
     'w,
     's,
@@ -1656,20 +1987,32 @@ fn apply_form_reset_requests(
     }
 }
 
+#[derive(SystemParam)]
+struct FormSubmitQueries<'w, 's> {
+    text: FormTextQuery<'w, 's>,
+    control: FormControlQuery<'w, 's>,
+    select: FormSelectQuery<'w, 's>,
+    range: FormRangeQuery<'w, 's>,
+}
+
+#[derive(SystemParam)]
+struct FormSubmitOutputs<'w> {
+    submitted: EventWriter<'w, UiXmlFormSubmitted>,
+    validation_failed: EventWriter<'w, UiXmlFormValidationFailed>,
+    validation_changed: EventWriter<'w, UiXmlValidationStateChanged>,
+    navigation: EventWriter<'w, UiXmlNavigationRequested>,
+}
+
 fn apply_form_submit_requests(
     mut requests: EventReader<UiXmlFormSubmitRequested>,
-    mut text_query: FormTextQuery<'_, '_>,
-    control_query: FormControlQuery<'_, '_>,
-    mut submitted: EventWriter<UiXmlFormSubmitted>,
-    mut validation_failed: EventWriter<UiXmlFormValidationFailed>,
-    mut validation_changed: EventWriter<UiXmlValidationStateChanged>,
-    mut navigation: EventWriter<UiXmlNavigationRequested>,
+    mut queries: FormSubmitQueries<'_, '_>,
+    mut outputs: FormSubmitOutputs<'_>,
 ) {
     for request in requests.read() {
         let mut values = Vec::new();
         let mut valid = true;
 
-        for (entity, scope, name, value, required, validation_state) in &mut text_query {
+        for (entity, scope, name, value, required, validation_state) in &mut queries.text {
             if scope.0 != request.form {
                 continue;
             }
@@ -1682,12 +2025,14 @@ fn apply_form_submit_requests(
                     validation_state.valid = false;
                     validation_state.reason = Some("required".to_string());
                 }
-                validation_changed.send(UiXmlValidationStateChanged {
-                    entity,
-                    valid: false,
-                    reason: Some("required".to_string()),
-                });
-                validation_failed.send(UiXmlFormValidationFailed {
+                outputs
+                    .validation_changed
+                    .send(UiXmlValidationStateChanged {
+                        entity,
+                        valid: false,
+                        reason: Some("required".to_string()),
+                    });
+                outputs.validation_failed.send(UiXmlFormValidationFailed {
                     form: request.form,
                     entity,
                     name: name_value.map(str::to_string),
@@ -1696,11 +2041,13 @@ fn apply_form_submit_requests(
             } else if let Some(mut validation_state) = validation_state {
                 validation_state.valid = true;
                 validation_state.reason = None;
-                validation_changed.send(UiXmlValidationStateChanged {
-                    entity,
-                    valid: true,
-                    reason: None,
-                });
+                outputs
+                    .validation_changed
+                    .send(UiXmlValidationStateChanged {
+                        entity,
+                        valid: true,
+                        reason: None,
+                    });
             }
             if let Some(name) = name_value {
                 values.push(UiXmlFormValue {
@@ -1710,7 +2057,7 @@ fn apply_form_submit_requests(
             }
         }
 
-        for (scope, name, value, kind, checked) in &control_query {
+        for (scope, name, value, kind, checked) in &queries.control {
             if scope.0 != request.form || !checked.0 {
                 continue;
             }
@@ -1726,14 +2073,40 @@ fn apply_form_submit_requests(
             });
         }
 
+        for (scope, name, value) in &queries.select {
+            if scope.0 != request.form {
+                continue;
+            }
+            let Some(name) = normalized_name(name) else {
+                continue;
+            };
+            values.push(UiXmlFormValue {
+                name: name.to_string(),
+                value: value.0.clone(),
+            });
+        }
+
+        for (scope, name, value) in &queries.range {
+            if scope.0 != request.form {
+                continue;
+            }
+            let Some(name) = normalized_name(name) else {
+                continue;
+            };
+            values.push(UiXmlFormValue {
+                name: name.to_string(),
+                value: format_scalar(value.0),
+            });
+        }
+
         if valid {
-            navigation.send(UiXmlNavigationRequested {
+            outputs.navigation.send(UiXmlNavigationRequested {
                 form: request.form,
                 action: None,
                 method: None,
                 values: values.clone(),
             });
-            submitted.send(UiXmlFormSubmitted {
+            outputs.submitted.send(UiXmlFormSubmitted {
                 form: request.form,
                 values,
             });
@@ -1767,6 +2140,27 @@ fn sync_text_display(
         if let Some(section) = text.sections.first_mut() {
             apply_text_presentation(section, value, placeholder);
         }
+    }
+}
+
+type ScalarFillQuery<'w, 's, T> =
+    Query<'w, 's, (&'static T, &'static mut UiXmlFillPercent), Changed<T>>;
+
+fn sync_scalar_fill_percent(
+    mut params: ParamSet<(
+        ScalarFillQuery<'_, '_, UiXmlProgress>,
+        ScalarFillQuery<'_, '_, UiXmlMeter>,
+    )>,
+) {
+    for (progress, mut fill) in &mut params.p0() {
+        fill.0 = scalar_percent(progress.value.clamp(0.0, progress.max), 0.0, progress.max);
+    }
+    for (meter, mut fill) in &mut params.p1() {
+        fill.0 = scalar_percent(
+            meter.value.clamp(meter.min, meter.max),
+            meter.min,
+            meter.max,
+        );
     }
 }
 
@@ -2097,11 +2491,13 @@ fn apply_interaction_styles(
             }
             (Some(mut current), None) => {
                 current.background = None;
+                current.border_color = None;
                 current.border_radius = None;
                 current.box_shadow = None;
                 current.filter = None;
                 current.backdrop_filter = None;
                 current.gradient = None;
+                current.gradient_end = None;
             }
             (None, None) => {}
         }
@@ -2212,7 +2608,11 @@ fn apply_effect_materials(
                     resolved.opacity,
                 )
             }),
+            border_color: next_spec.border_color.unwrap_or(Color::NONE),
+            gradient_end: next_spec.gradient_end.unwrap_or(Color::NONE),
             radius: next_spec.radius_strength(),
+            border_width: next_spec.border_width_strength(),
+            gradient_mix: next_spec.gradient_end.map(|_| 1.0).unwrap_or(0.0),
             shadow_alpha: next_spec.shadow_alpha(),
         };
         if let Some(handle) = maybe_handle {

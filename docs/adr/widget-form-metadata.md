@@ -8,7 +8,7 @@ The parser preserves original tags and attributes while adding type-aware identi
 
 - `<input type="checkbox">` and `<checkbox>` have widget type `checkbox`.
 - `<input type="radio">` and `<radio>` have widget type `radio`.
-- Other `<input>` elements remain metadata-only `input` nodes.
+- `<input type="range">` has widget type `range`; other unsupported input types remain metadata-only `input` nodes.
 - `<form>` marks a control scope for descendants.
 
 Executable behavior is represented by typed components such as `UiXmlControlKind`, `UiXmlChecked`, `UiXmlControlValue`, `UiXmlControlName`, and `UiXmlControlScope`. Raw `UiXmlElement.attributes` remains structural metadata.
@@ -22,12 +22,22 @@ Executable behavior is represented by typed components such as `UiXmlControlKind
 ## Consequences
 
 - Existing button/text/image behavior remains unchanged.
-- Non-checkbox/radio form controls can be styled and inspected as metadata.
-- Checkbox/radio can be executable without making all form controls executable.
+- Textarea/select/range/progress/meter/scroll now have bounded game-widget runtime components.
+- Unsupported form controls can still be styled and inspected as metadata.
+- Checkbox/radio can be executable without making every browser form control executable.
 
 ## Deferred
 
-- Text input editing.
-- Textarea/select behavior.
-- Form submit/reset/serialization.
-- Browser-compatible validation.
+- Browser-compatible validation UI.
+- OS-native select/dropdown behavior.
+- Virtualized scroll lists.
+- Advanced textarea line navigation and visual selection rendering.
+
+
+## Game Widget Runtime Pack
+
+`UiXmlTextArea`, `UiXmlSelect`, `UiXmlOption`, `UiXmlRange`, `UiXmlProgress`,
+`UiXmlMeter`, and `UiXmlScrollContainer` provide bounded game UI behavior. These
+widgets reuse existing focus/navigation, selected/open pseudo-states, form
+serialization, and fill-percent metadata instead of implementing browser-complete
+controls.

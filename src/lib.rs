@@ -30,15 +30,19 @@ pub use runtime::{
     UiXmlActivateRequested, UiXmlBackRequested, UiXmlChecked, UiXmlClipboard,
     UiXmlClipboardCopyRequested, UiXmlClipboardCutRequested, UiXmlClipboardPasteRequested,
     UiXmlControlChanged, UiXmlControlKind, UiXmlControlName, UiXmlControlScope, UiXmlControlValue,
-    UiXmlDisabled, UiXmlDocumentOrder, UiXmlElement, UiXmlFocus, UiXmlFocusChanged, UiXmlFocusable,
-    UiXmlForm, UiXmlFormResetRequested, UiXmlFormSubmitRequested, UiXmlFormSubmitted,
-    UiXmlFormValidationFailed, UiXmlFormValue, UiXmlImePreedit, UiXmlInitialChecked,
-    UiXmlInitialTextValue, UiXmlInputModality, UiXmlNavigationDirection, UiXmlNavigationRequested,
-    UiXmlOpen, UiXmlPlugin, UiXmlRequired, UiXmlRuntimeState, UiXmlSelected, UiXmlSelectorContext,
+    UiXmlDisabled, UiXmlDocumentOrder, UiXmlElement, UiXmlFillPercent, UiXmlFocus,
+    UiXmlFocusChanged, UiXmlFocusable, UiXmlForm, UiXmlFormResetRequested,
+    UiXmlFormSubmitRequested, UiXmlFormSubmitted, UiXmlFormValidationFailed, UiXmlFormValue,
+    UiXmlImePreedit, UiXmlInitialChecked, UiXmlInitialTextValue, UiXmlInputModality, UiXmlMeter,
+    UiXmlNavigationDirection, UiXmlNavigationRequested, UiXmlOpen, UiXmlOption, UiXmlPlugin,
+    UiXmlProgress, UiXmlRange, UiXmlRangeChanged, UiXmlRangeValue, UiXmlRequired,
+    UiXmlRuntimeState, UiXmlScrollContainer, UiXmlScrollOffset, UiXmlScrollRequested, UiXmlSelect,
+    UiXmlSelectChanged, UiXmlSelectValue, UiXmlSelected, UiXmlSelectorContext,
     UiXmlSelectorContextCache, UiXmlSelectorSnapshot, UiXmlStateStyles, UiXmlStyleRuntime,
-    UiXmlStyleSource, UiXmlTextChanged, UiXmlTextCursor, UiXmlTextDisplay, UiXmlTextInput,
-    UiXmlTextPlaceholder, UiXmlTextSelectAllRequested, UiXmlTextSelection, UiXmlTextValue,
-    UiXmlThemeTokens, UiXmlTransitionState, UiXmlValidationState, UiXmlValidationStateChanged,
+    UiXmlStyleSource, UiXmlTextArea, UiXmlTextChanged, UiXmlTextCursor, UiXmlTextDisplay,
+    UiXmlTextInput, UiXmlTextPlaceholder, UiXmlTextSelectAllRequested, UiXmlTextSelection,
+    UiXmlTextValue, UiXmlThemeTokens, UiXmlTransitionState, UiXmlValidationState,
+    UiXmlValidationStateChanged,
 };
 pub use style::{
     AlignSelfValue, AlignValue, DisplayValue, EdgeSizes, FlexDirectionValue, FlexWrapValue,
@@ -1621,7 +1625,8 @@ mod tests {
         app.init_resource::<Assets<UiXmlEffectMaterial>>();
 
         let style = UiStyle {
-            background: Some("tomato".to_string()),
+            background: Some("linear-gradient(90deg, tomato, royalblue)".to_string()),
+            border_color: Some("gold".to_string()),
             border_radius: Some("8px".to_string()),
             box_shadow: Some("0 4px 8px black".to_string()),
             ..Default::default()
@@ -1649,11 +1654,13 @@ mod tests {
                 },
                 UiXmlRenderMaterialSpec {
                     background: Some(Color::rgb_u8(255, 99, 71)),
+                    border_color: Some(Color::rgb_u8(255, 215, 0)),
                     border_radius: Some("8px".to_string()),
                     box_shadow: Some("0 4px 8px black".to_string()),
                     filter: None,
                     backdrop_filter: None,
                     gradient: None,
+                    gradient_end: Some(Color::rgb_u8(65, 105, 225)),
                 },
                 Style::default(),
                 BorderColor(Color::NONE),
@@ -1673,7 +1680,11 @@ mod tests {
             .get(handle)
             .unwrap();
         assert_eq!(material.color.as_rgba_u8(), [255, 99, 71, 255]);
+        assert_eq!(material.border_color.as_rgba_u8(), [255, 215, 0, 255]);
+        assert_eq!(material.gradient_end.as_rgba_u8(), [65, 105, 225, 255]);
         assert!(material.radius > 0.0);
+        assert!(material.border_width > 0.0);
+        assert!(material.gradient_mix > 0.0);
         assert!(material.shadow_alpha > 0.0);
         assert!(!app.world.entity(entity).contains::<BackgroundColor>());
         assert!(matches!(
@@ -1906,7 +1917,7 @@ mod tests {
         assert_eq!(children[4].widget_type(), "text-input");
         assert_eq!(children[4].attr("placeholder"), Some("Email"));
         assert_eq!(children[5].widget_type(), "text-input");
-        assert_eq!(children[6].widget_type(), "input");
+        assert_eq!(children[6].widget_type(), "range");
     }
 
     #[test]
@@ -2318,10 +2329,11 @@ mod tests {
         let volume = entity_by_id(&mut app, "volume");
         let volume_entity = app.world.entity(volume);
         let volume_element = volume_entity.get::<UiXmlElement>().unwrap();
-        assert_eq!(volume_element.widget_type, "input");
+        assert_eq!(volume_element.widget_type, "range");
         assert!(!volume_entity.contains::<UiXmlTextInput>());
         assert!(!volume_entity.contains::<UiXmlTextValue>());
         assert!(!volume_entity.contains::<UiXmlControlKind>());
+        assert!(volume_entity.contains::<UiXmlRange>());
 
         app.update();
         assert!(drain_control_events(&mut app).is_empty());
@@ -2814,5 +2826,203 @@ mod tests {
         );
         app.update();
         assert!(app.world.resource::<UiXmlStyleRuntime>().generation > 0);
+    }
+
+    #[test]
+    fn textarea_supports_multiline_editing_and_form_serialization() {
+        let mut app = spawn_test_app(
+            r#"
+            <ui id="root">
+                <form id="profile">
+                    <textarea id="bio" name="bio" placeholder="Bio">hello</textarea>
+                </form>
+            </ui>
+            "#,
+            r#"{}"#,
+        );
+        drain_text_events(&mut app);
+
+        let form = entity_by_id(&mut app, "profile");
+        let bio = entity_by_id(&mut app, "bio");
+        assert!(app.world.entity(bio).contains::<UiXmlTextArea>());
+        assert_eq!(
+            app.world.entity(bio).get::<UiXmlTextValue>().unwrap().0,
+            "hello"
+        );
+
+        app.world.resource_mut::<UiXmlFocus>().entity = Some(bio);
+        send_key(&mut app, KeyCode::Enter);
+        send_character(&mut app, '!');
+        assert_eq!(
+            app.world.entity(bio).get::<UiXmlTextValue>().unwrap().0,
+            "hello\n!"
+        );
+
+        app.world
+            .resource_mut::<Events<UiXmlFormSubmitRequested>>()
+            .send(UiXmlFormSubmitRequested { form });
+        app.update();
+        let submitted = drain_form_submitted(&mut app);
+        assert!(submitted[0].values.contains(&UiXmlFormValue {
+            name: "bio".to_string(),
+            value: "hello\n!".to_string()
+        }));
+    }
+
+    #[test]
+    fn select_option_updates_open_selected_value_and_form_serialization() {
+        let mut app = spawn_test_app(
+            r#"
+            <ui id="root">
+                <form id="settings">
+                    <select id="quality" name="quality">
+                        <option id="low" value="low">Low</option>
+                        <option id="high" value="high" selected="true">High</option>
+                    </select>
+                </form>
+            </ui>
+            "#,
+            r#"{}"#,
+        );
+        let form = entity_by_id(&mut app, "settings");
+        let quality = entity_by_id(&mut app, "quality");
+        let low = entity_by_id(&mut app, "low");
+        let high = entity_by_id(&mut app, "high");
+
+        assert_eq!(
+            app.world
+                .entity(quality)
+                .get::<UiXmlSelectValue>()
+                .unwrap()
+                .0,
+            "high"
+        );
+        assert!(app.world.entity(high).get::<UiXmlSelected>().unwrap().0);
+
+        app.world
+            .resource_mut::<Events<UiXmlActivateRequested>>()
+            .send(UiXmlActivateRequested { entity: quality });
+        app.update();
+        assert!(app.world.entity(quality).get::<UiXmlOpen>().unwrap().0);
+
+        app.world
+            .resource_mut::<Events<UiXmlActivateRequested>>()
+            .send(UiXmlActivateRequested { entity: low });
+        app.update();
+        assert_eq!(
+            app.world
+                .entity(quality)
+                .get::<UiXmlSelectValue>()
+                .unwrap()
+                .0,
+            "low"
+        );
+        assert!(app.world.entity(low).get::<UiXmlSelected>().unwrap().0);
+        assert!(!app.world.entity(high).get::<UiXmlSelected>().unwrap().0);
+        assert!(!app.world.entity(quality).get::<UiXmlOpen>().unwrap().0);
+        let events: Vec<_> = app
+            .world
+            .resource_mut::<Events<UiXmlSelectChanged>>()
+            .drain()
+            .collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].previous_value, "high");
+        assert_eq!(events[0].value, "low");
+
+        app.world
+            .resource_mut::<Events<UiXmlFormSubmitRequested>>()
+            .send(UiXmlFormSubmitRequested { form });
+        app.update();
+        let submitted = drain_form_submitted(&mut app);
+        assert!(submitted[0].values.contains(&UiXmlFormValue {
+            name: "quality".to_string(),
+            value: "low".to_string()
+        }));
+    }
+
+    #[test]
+    fn range_progress_meter_and_scroll_expose_game_widget_state() {
+        let mut app = spawn_test_app(
+            r#"
+            <ui id="root">
+                <form id="settings">
+                    <input id="volume" type="range" name="volume" min="0" max="10" step="2" value="3" />
+                </form>
+                <progress id="loading" value="25" max="100" />
+                <meter id="hp" min="0" max="200" value="50" />
+                <scroll id="inventory" min="0" max="10" offset="2" />
+            </ui>
+            "#,
+            r#"{}"#,
+        );
+        let form = entity_by_id(&mut app, "settings");
+        let volume = entity_by_id(&mut app, "volume");
+        let loading = entity_by_id(&mut app, "loading");
+        let hp = entity_by_id(&mut app, "hp");
+        let inventory = entity_by_id(&mut app, "inventory");
+
+        assert_eq!(
+            app.world.entity(volume).get::<UiXmlRangeValue>().unwrap().0,
+            4.0
+        );
+        assert_eq!(
+            app.world
+                .entity(volume)
+                .get::<UiXmlFillPercent>()
+                .unwrap()
+                .0,
+            0.4
+        );
+        app.world.resource_mut::<UiXmlFocus>().entity = Some(volume);
+        send_key(&mut app, KeyCode::ArrowRight);
+        assert_eq!(
+            app.world.entity(volume).get::<UiXmlRangeValue>().unwrap().0,
+            6.0
+        );
+        let range_events: Vec<_> = app
+            .world
+            .resource_mut::<Events<UiXmlRangeChanged>>()
+            .drain()
+            .collect();
+        assert_eq!(range_events.len(), 1);
+
+        assert_eq!(
+            app.world
+                .entity(loading)
+                .get::<UiXmlFillPercent>()
+                .unwrap()
+                .0,
+            0.25
+        );
+        assert_eq!(
+            app.world.entity(hp).get::<UiXmlFillPercent>().unwrap().0,
+            0.25
+        );
+
+        app.world
+            .resource_mut::<Events<UiXmlScrollRequested>>()
+            .send(UiXmlScrollRequested {
+                entity: inventory,
+                delta: 20.0,
+            });
+        app.update();
+        assert_eq!(
+            app.world
+                .entity(inventory)
+                .get::<UiXmlScrollOffset>()
+                .unwrap()
+                .0,
+            10.0
+        );
+
+        app.world
+            .resource_mut::<Events<UiXmlFormSubmitRequested>>()
+            .send(UiXmlFormSubmitRequested { form });
+        app.update();
+        let submitted = drain_form_submitted(&mut app);
+        assert!(submitted[0].values.contains(&UiXmlFormValue {
+            name: "volume".to_string(),
+            value: "6".to_string()
+        }));
     }
 }

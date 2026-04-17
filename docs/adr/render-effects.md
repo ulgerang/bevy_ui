@@ -43,6 +43,7 @@ Runtime hover/active/disabled restyling updates Bevy-supported UI properties suc
 `UiMaterial` shader path for projects that include Bevy render plugins. The
 default `UiXmlPlugin` does not install the render plugin so headless tests and
 non-render apps remain lightweight. The bundled WGSL shader is a bounded first
-pass for tinting, approximate rounded alpha, and shadow edge darkening; it does
-not claim browser-equivalent filters, backdrop filters, gradients, or
+pass for tinting, approximate rounded alpha, simple border color, horizontal
+two-stop gradient blending, and shadow edge darkening; it does not claim
+browser-equivalent filters, backdrop filters, arbitrary gradients, or
 layout-affecting shadows.

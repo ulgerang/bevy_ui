@@ -5,9 +5,11 @@ use crate::render_effects::{
 use crate::runtime::{
     apply_text_presentation, RuntimeStyleInputs, UiXmlChecked, UiXmlControlKind, UiXmlControlName,
     UiXmlControlScope, UiXmlControlValue, UiXmlDisabled, UiXmlDocumentOrder, UiXmlElement,
-    UiXmlFocusable, UiXmlForm, UiXmlImePreedit, UiXmlInitialChecked, UiXmlInitialTextValue,
-    UiXmlOpen, UiXmlRequired, UiXmlRuntimeState, UiXmlSelected, UiXmlSelectorContext,
-    UiXmlStateStyles, UiXmlStyleSource, UiXmlTextCursor, UiXmlTextDisplay, UiXmlTextInput,
+    UiXmlFillPercent, UiXmlFocusable, UiXmlForm, UiXmlImePreedit, UiXmlInitialChecked,
+    UiXmlInitialTextValue, UiXmlMeter, UiXmlOpen, UiXmlOption, UiXmlProgress, UiXmlRange,
+    UiXmlRangeValue, UiXmlRequired, UiXmlRuntimeState, UiXmlScrollContainer, UiXmlScrollOffset,
+    UiXmlSelect, UiXmlSelectValue, UiXmlSelected, UiXmlSelectorContext, UiXmlStateStyles,
+    UiXmlStyleSource, UiXmlTextArea, UiXmlTextCursor, UiXmlTextDisplay, UiXmlTextInput,
     UiXmlTextPlaceholder, UiXmlTextSelection, UiXmlTextValue, UiXmlValidationState,
 };
 use crate::selector::PseudoClass;
@@ -231,7 +233,7 @@ fn spawn_node<'a>(
             );
             entity
         }
-        "text-input" => {
+        "text-input" | "textarea" => {
             let entity = commands
                 .spawn(ButtonBundle {
                     style: bevy_style,
@@ -249,11 +251,22 @@ fn spawn_node<'a>(
                 .insert(UiXmlStateStyles::from_runtime_styles(runtime_styles))
                 .insert(UiXmlTextInput)
                 .id();
+            if widget_type == "textarea" {
+                commands.entity(entity).insert(UiXmlTextArea);
+            }
             attach_optional_render_components(commands, entity, &style);
             attach_widget_metadata(commands, entity, node, current_scope, order);
 
             let font = load_font(resources.asset_server, resources.default_font);
-            let text_value = UiXmlTextValue(node.attr("value").unwrap_or_default().to_string());
+            let text_value = UiXmlTextValue(
+                node.attr("value")
+                    .unwrap_or(if widget_type == "textarea" {
+                        &node.text
+                    } else {
+                        ""
+                    })
+                    .to_string(),
+            );
             let text_cursor = UiXmlTextCursor {
                 position: text_value.0.chars().count(),
             };
@@ -279,7 +292,13 @@ fn spawn_node<'a>(
             });
             commands.entity(entity).insert(UiXmlImePreedit::default());
             commands.entity(entity).insert(UiXmlInitialTextValue(
-                node.attr("value").unwrap_or_default().to_string(),
+                node.attr("value")
+                    .unwrap_or(if widget_type == "textarea" {
+                        &node.text
+                    } else {
+                        ""
+                    })
+                    .to_string(),
             ));
             if let Some(placeholder) = placeholder {
                 commands.entity(entity).insert(placeholder);
@@ -351,6 +370,34 @@ fn spawn_node<'a>(
                 .id();
             attach_optional_render_components(commands, entity, &style);
             attach_widget_metadata(commands, entity, node, current_scope, order);
+            entity
+        }
+        "select" | "option" | "range" | "progress" | "meter" | "scroll" => {
+            let entity = commands
+                .spawn(NodeBundle {
+                    style: bevy_style,
+                    background_color: background.into(),
+                    border_color: border_color.into(),
+                    visibility,
+                    z_index,
+                    ..Default::default()
+                })
+                .insert(UiXmlElement::from(node))
+                .insert(disabled)
+                .insert(runtime_state)
+                .insert(style_source)
+                .insert(selector_context)
+                .id();
+            attach_optional_render_components(commands, entity, &style);
+            attach_widget_metadata(commands, entity, node, current_scope, order);
+            add_children(
+                commands,
+                entity,
+                node,
+                resources,
+                state,
+                scope_for_children(node, entity, current_scope),
+            );
             entity
         }
         _ => {
@@ -484,6 +531,7 @@ fn attach_widget_metadata(
     if node.attr("open").is_some() {
         commands.entity(entity).insert(UiXmlOpen(true));
     }
+    attach_game_widget_metadata(commands, entity, node, current_scope);
 
     let Some(kind) = control_kind(node) else {
         attach_text_input_metadata(commands, entity, node, current_scope);
@@ -510,6 +558,118 @@ fn attach_widget_metadata(
     }
 }
 
+fn attach_game_widget_metadata(
+    commands: &mut Commands<'_, '_>,
+    entity: Entity,
+    node: &ElementNode,
+    current_scope: Option<Entity>,
+) {
+    match node.widget_type() {
+        "select" => {
+            let selected_value = selected_option_value(node).unwrap_or_default();
+            commands
+                .entity(entity)
+                .insert(UiXmlSelect)
+                .insert(UiXmlOpen(node.attr("open").is_some()))
+                .insert(UiXmlSelectValue(selected_value))
+                .insert(UiXmlControlScope(current_scope.unwrap_or(entity)));
+            attach_name(commands, entity, node);
+        }
+        "option" => {
+            let value = node.attr("value").unwrap_or(&node.text).to_string();
+            commands
+                .entity(entity)
+                .insert(UiXmlOption { value })
+                .insert(UiXmlSelected(node.attr("selected").is_some()));
+        }
+        "range" => {
+            let min = parse_attr_f32(node, "min").unwrap_or(0.0);
+            let max = parse_attr_f32(node, "max").unwrap_or(100.0);
+            let step = parse_attr_f32(node, "step")
+                .unwrap_or(1.0)
+                .max(f32::EPSILON);
+            let value =
+                snap_range_value(parse_attr_f32(node, "value").unwrap_or(min), min, max, step);
+            commands
+                .entity(entity)
+                .insert(UiXmlRange { min, max, step })
+                .insert(UiXmlRangeValue(value))
+                .insert(range_percent(value, min, max))
+                .insert(UiXmlControlScope(current_scope.unwrap_or(entity)));
+            attach_name(commands, entity, node);
+        }
+        "progress" => {
+            let max = parse_attr_f32(node, "max").unwrap_or(1.0).max(f32::EPSILON);
+            let value = parse_attr_f32(node, "value").unwrap_or(0.0).clamp(0.0, max);
+            commands
+                .entity(entity)
+                .insert(UiXmlProgress { value, max })
+                .insert(range_percent(value, 0.0, max));
+        }
+        "meter" => {
+            let min = parse_attr_f32(node, "min").unwrap_or(0.0);
+            let max = parse_attr_f32(node, "max")
+                .unwrap_or(1.0)
+                .max(min + f32::EPSILON);
+            let value = parse_attr_f32(node, "value").unwrap_or(min).clamp(min, max);
+            commands
+                .entity(entity)
+                .insert(UiXmlMeter { value, min, max })
+                .insert(range_percent(value, min, max));
+        }
+        "scroll" => {
+            let min = parse_attr_f32(node, "min").unwrap_or(0.0);
+            let max = parse_attr_f32(node, "max").unwrap_or(0.0).max(min);
+            let offset = parse_attr_f32(node, "offset")
+                .unwrap_or(min)
+                .clamp(min, max);
+            commands
+                .entity(entity)
+                .insert(UiXmlScrollContainer { min, max })
+                .insert(UiXmlScrollOffset(offset));
+        }
+        _ => {}
+    }
+}
+
+fn selected_option_value(node: &ElementNode) -> Option<String> {
+    node.children
+        .iter()
+        .find(|child| child.widget_type() == "option" && child.attr("selected").is_some())
+        .or_else(|| {
+            node.children
+                .iter()
+                .find(|child| child.widget_type() == "option")
+        })
+        .map(|child| child.attr("value").unwrap_or(&child.text).to_string())
+}
+
+fn parse_attr_f32(node: &ElementNode, name: &str) -> Option<f32> {
+    node.attr(name)?.trim().parse::<f32>().ok()
+}
+
+fn snap_range_value(value: f32, min: f32, max: f32, step: f32) -> f32 {
+    let steps = ((value - min) / step).round();
+    (min + steps * step).clamp(min, max)
+}
+
+fn range_percent(value: f32, min: f32, max: f32) -> UiXmlFillPercent {
+    let span = (max - min).max(f32::EPSILON);
+    UiXmlFillPercent(((value - min) / span).clamp(0.0, 1.0))
+}
+
+fn attach_name(commands: &mut Commands<'_, '_>, entity: Entity, node: &ElementNode) {
+    if let Some(name) = node
+        .attr("name")
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        commands
+            .entity(entity)
+            .insert(UiXmlControlName(name.to_string()));
+    }
+}
+
 fn attach_focusable_metadata(
     commands: &mut Commands<'_, '_>,
     entity: Entity,
@@ -518,7 +678,7 @@ fn attach_focusable_metadata(
 ) {
     let inherently_focusable = matches!(
         node.widget_type(),
-        "button" | "checkbox" | "radio" | "text-input"
+        "button" | "checkbox" | "radio" | "text-input" | "textarea" | "select" | "option" | "range"
     );
     let focusable_attr = node.attr("focusable").is_some_and(|value| value != "false");
     let tab_index = node
@@ -553,20 +713,14 @@ fn attach_text_input_metadata(
     node: &ElementNode,
     current_scope: Option<Entity>,
 ) {
-    if node.widget_type() != "text-input" {
+    if node.widget_type() != "text-input" && node.widget_type() != "textarea" {
         return;
     }
 
     let mut entity_commands = commands.entity(entity);
     entity_commands.insert(UiXmlControlScope(current_scope.unwrap_or(entity)));
 
-    if let Some(name) = node
-        .attr("name")
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-    {
-        entity_commands.insert(UiXmlControlName(name.to_string()));
-    }
+    attach_name(commands, entity, node);
 }
 
 fn control_kind(node: &ElementNode) -> Option<UiXmlControlKind> {

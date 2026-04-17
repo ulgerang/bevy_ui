@@ -34,6 +34,9 @@ impl ElementNode {
             if input_type.is_empty() || input_type.eq_ignore_ascii_case("text") {
                 return "text-input";
             }
+            if input_type.eq_ignore_ascii_case("range") {
+                return "range";
+            }
         }
         canonical_tag(&self.tag)
     }
@@ -51,6 +54,9 @@ fn canonical_tag(tag: &str) -> &str {
         "textarea" => "textarea",
         "select" => "select",
         "option" => "option",
+        "progress" => "progress",
+        "meter" => "meter",
+        "scroll" => "scroll",
         "checkbox" => "checkbox",
         "radio" => "radio",
         _ => tag,

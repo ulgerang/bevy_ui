@@ -17,11 +17,13 @@ pub struct UiXmlBorderColors {
 #[derive(Component, Debug, Clone, PartialEq)]
 pub struct UiXmlRenderMaterialSpec {
     pub background: Option<Color>,
+    pub border_color: Option<Color>,
     pub border_radius: Option<String>,
     pub box_shadow: Option<String>,
     pub filter: Option<String>,
     pub backdrop_filter: Option<String>,
     pub gradient: Option<String>,
+    pub gradient_end: Option<Color>,
 }
 
 impl UiXmlRenderMaterialSpec {
@@ -39,6 +41,10 @@ impl UiXmlRenderMaterialSpec {
             .map(|_| 0.25)
             .or_else(|| self.filter.as_ref().map(|_| 0.1))
             .unwrap_or(0.0)
+    }
+
+    pub(crate) fn border_width_strength(&self) -> f32 {
+        self.border_color.map(|_| 0.025).unwrap_or(0.0)
     }
 }
 
@@ -124,22 +130,39 @@ pub(crate) fn render_material_spec_from_style(style: &UiStyle) -> Option<UiXmlRe
         .as_deref()
         .filter(|value| value.contains("gradient"))
         .map(str::to_string);
+    let gradient_end = gradient.as_deref().and_then(parse_gradient_end_color);
     let spec = UiXmlRenderMaterialSpec {
         background: style
             .background
             .as_deref()
+            .and_then(|color| crate::style::parse_color(Some(color))),
+        border_color: style
+            .border_color
+            .as_deref()
+            .or(style.border_top_color.as_deref())
             .and_then(|color| crate::style::parse_color(Some(color))),
         border_radius: style.border_radius.clone(),
         box_shadow: style.box_shadow.clone(),
         filter: style.filter.clone(),
         backdrop_filter: style.backdrop_filter.clone(),
         gradient,
+        gradient_end,
     };
 
     (spec.border_radius.is_some()
         || spec.box_shadow.is_some()
         || spec.filter.is_some()
         || spec.backdrop_filter.is_some()
-        || spec.gradient.is_some())
+        || spec.gradient.is_some()
+        || spec.border_color.is_some())
     .then_some(spec)
+}
+
+fn parse_gradient_end_color(value: &str) -> Option<Color> {
+    let inside = value.split_once('(')?.1.strip_suffix(')')?;
+    inside.rsplit(',').find_map(|part| {
+        part.split_whitespace()
+            .next()
+            .and_then(|token| crate::style::parse_color(Some(token)))
+    })
 }

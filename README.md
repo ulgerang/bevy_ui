@@ -22,8 +22,11 @@ Supported elements:
 - `<input type="checkbox">`, `<checkbox>`, `<input type="radio">`, and
   `<radio>` as bounded interactive controls
 - `<input type="text">` and `<input>` as bounded text controls
-- other `<input>`, `<textarea>`, `<select>`, and `<option>`-style form nodes as
-  structural metadata only
+- `<textarea>` as bounded multiline text controls
+- `<select>` and `<option>` as bounded dropdown/listbox controls
+- `<input type="range">` as bounded sliders
+- `<progress>` and `<meter>` as bounded value bars
+- `<scroll>` as a bounded scroll container
 
 Supported selectors:
 
@@ -246,6 +249,15 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
 ```
 
 
+
+Game widget runtime pack:
+
+- `textarea` reuses text input value/cursor/selection/placeholder behavior and supports newline insertion.
+- `select` / `option` use `UiXmlOpen`, `UiXmlSelected`, `UiXmlSelectValue`, and `UiXmlSelectChanged`.
+- `input type="range"` uses `UiXmlRange`, `UiXmlRangeValue`, `UiXmlRangeChanged`, and `UiXmlFillPercent`.
+- `progress` / `meter` expose clamped value metadata and `UiXmlFillPercent`.
+- `scroll` exposes `UiXmlScrollContainer`, `UiXmlScrollOffset`, and `UiXmlScrollRequested`.
+
 Asset-backed UI loading:
 
 - `UiXmlAssetPlugin` registers XML and CSS/style asset loaders without changing the string-first API.
@@ -279,5 +291,6 @@ material path with `UiXmlEffectMaterialPlugin`. The core `UiXmlPlugin` remains
 headless-test friendly and only creates material handles when an
 `Assets<UiXmlEffectMaterial>` resource is present. The shader is intentionally a
 bounded first pass: it tints effect nodes, applies approximate rounded alpha,
+draws a simple border color, blends a two-stop horizontal gradient when available,
 and darkens shadowed edges. It is not a browser renderer for filters, backdrop
 filters, or layout-affecting shadows.
